@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- The engine targets a single modern runtime. Unlike RP.Math (which also targets
+         netstandard2.0 so it can be consumed anywhere), Game depends on Silk.NET/Vulkan and
+         is only ever the foundation of a desktop game, so one current TFM keeps things simple. -->
+    <TargetFramework>net8.0</TargetFramework>
+
+    <!-- Mirror RP.Math's convention exactly so the two libraries read as siblings:
+         a single root namespace equal to the assembly name, with area sub-namespaces beneath it
+         (RP.Game.Core, RP.Game.Rendering, RP.Game.Physics, ...). -->
+    <AssemblyName>RP.Game</AssemblyName>
+    <RootNamespace>RP.Game</RootNamespace>
+
+    <!-- This codebase is a teaching artefact (build brief S4.5): public APIs carry tutorial-grade
+         XML docs, so emit the documentation file and let the missing-comment warnings guide us. -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- Silence "missing XML comment" (CS1591) / "missing param tag" (CS1573) while the surface is
+         still being filled in, so genuine warnings stay visible. -->
+    <NoWarn>$(NoWarn);CS1591;CS1573</NoWarn>
+
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Dependency direction is strictly upward: Game depends on Math, never the reverse. -->
+    <ProjectReference Include="..\..\Math\RP.Math\RP.Math.csproj" />
+  </ItemGroup>
+
+</Project>
