@@ -4,6 +4,8 @@ namespace RP.Game.Graphics.Vulkan
     using System.Collections.Generic;
     using System.Linq;
     using RP.Game.Core.Logging;
+    using RP.Game.Rendering;
+    using RP.Math;
     using Silk.NET.Core;
     using Silk.NET.Core.Native;
     using Silk.NET.Vulkan;
@@ -91,7 +93,15 @@ namespace RP.Game.Graphics.Vulkan
         private bool _disposed;
 
         /// <inheritdoc />
-        public (float R, float G, float B, float A) ClearColor { get; set; } = (0f, 0f, 0f, 1f);
+        public (float R, float G, float B, float A) ClearColor { get; set; } = (0.02f, 0.02f, 0.04f, 1f);
+
+        /// <summary>The camera used to view the scene. Position it from game code; its aspect ratio is kept
+        /// in step with the swapchain automatically.</summary>
+        public Camera Camera { get; } = new Camera();
+
+        /// <summary>The model transform applied to the test cube (world placement/orientation). Game code
+        /// sets this each frame to move or spin the cube.</summary>
+        public Matrix ModelTransform { get; set; } = Matrix.Identity;
 
         /// <summary>
         /// Brings the entire Vulkan stack up against an already-initialised window.
@@ -122,10 +132,11 @@ namespace RP.Game.Graphics.Vulkan
             CreateLogicalDevice();
             CreateSwapchain();
             CreateImageViews();
+            CreateDepthResources();
             CreateGraphicsPipeline();
             CreateCommandPool();
             CreateCommandBuffers();
-            CreateTriangleMesh(); // needs the command pool + graphics queue for the staging upload
+            CreateCubeMesh(); // needs the command pool + graphics queue for the staging upload
             CreateSyncObjects();
 
             _log.Info("Vulkan", $"Renderer up: {_swapchainImages.Length} swapchain images at " +
@@ -605,6 +616,9 @@ namespace RP.Game.Graphics.Vulkan
 
             _swapchainFormat = surfaceFormat.Format;
             _swapchainExtent = extent;
+
+            // Keep the camera's aspect ratio matched to the render target so the image never stretches.
+            if (extent.Height != 0) Camera.AspectRatio = (double)extent.Width / extent.Height;
         }
 
         private SurfaceFormatKHR ChooseSurfaceFormat(SurfaceFormatKHR[] formats)
@@ -857,6 +871,13 @@ namespace RP.Game.Graphics.Vulkan
                 0, AccessFlags.ColorAttachmentWriteBit,
                 PipelineStageFlags.TopOfPipeBit, PipelineStageFlags.ColorAttachmentOutputBit);
 
+            // The depth image likewise starts fresh each frame (we clear it), so UNDEFINED is fine.
+            TransitionImage(cb, _depthImage,
+                ImageLayout.Undefined, ImageLayout.DepthAttachmentOptimal,
+                0, AccessFlags.DepthStencilAttachmentWriteBit,
+                PipelineStageFlags.TopOfPipeBit, PipelineStageFlags.EarlyFragmentTestsBit,
+                ImageAspectFlags.DepthBit);
+
             var clear = new ClearValue
             {
                 Color = new ClearColorValue(ClearColor.R, ClearColor.G, ClearColor.B, ClearColor.A),
@@ -872,6 +893,17 @@ namespace RP.Game.Graphics.Vulkan
                 ClearValue = clear,
             };
 
+            // Depth attachment: clear to the far value (1.0) each frame; we don't need to keep it after.
+            var depthAttachment = new RenderingAttachmentInfo
+            {
+                SType = StructureType.RenderingAttachmentInfo,
+                ImageView = _depthView,
+                ImageLayout = ImageLayout.DepthAttachmentOptimal,
+                LoadOp = AttachmentLoadOp.Clear,
+                StoreOp = AttachmentStoreOp.DontCare,
+                ClearValue = new ClearValue { DepthStencil = new ClearDepthStencilValue(1.0f, 0) },
+            };
+
             var renderingInfo = new RenderingInfo
             {
                 SType = StructureType.RenderingInfo,
@@ -879,10 +911,11 @@ namespace RP.Game.Graphics.Vulkan
                 LayerCount = 1,
                 ColorAttachmentCount = 1,
                 PColorAttachments = &colorAttachment,
+                PDepthAttachment = &depthAttachment,
             };
 
             _vk.CmdBeginRendering(cb, in renderingInfo);
-            RecordTriangle(cb); // Phase 1: draw the test triangle through the graphics pipeline.
+            RecordMesh(cb); // Phase 1: draw the lit cube through the graphics pipeline.
             _vk.CmdEndRendering(cb);
 
             // COLOR_ATTACHMENT_OPTIMAL -> PRESENT_SRC: make it safe for the OS to display.
@@ -903,7 +936,8 @@ namespace RP.Game.Graphics.Vulkan
             CommandBuffer cb, Image image,
             ImageLayout oldLayout, ImageLayout newLayout,
             AccessFlags srcAccess, AccessFlags dstAccess,
-            PipelineStageFlags srcStage, PipelineStageFlags dstStage)
+            PipelineStageFlags srcStage, PipelineStageFlags dstStage,
+            ImageAspectFlags aspect = ImageAspectFlags.ColorBit)
         {
             var barrier = new ImageMemoryBarrier
             {
@@ -913,7 +947,7 @@ namespace RP.Game.Graphics.Vulkan
                 SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
                 DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
                 Image = image,
-                SubresourceRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, 0, 1),
+                SubresourceRange = new ImageSubresourceRange(aspect, 0, 1, 0, 1),
                 SrcAccessMask = srcAccess,
                 DstAccessMask = dstAccess,
             };
@@ -949,12 +983,15 @@ namespace RP.Game.Graphics.Vulkan
             DestroySwapchain();
             CreateSwapchain();
             CreateImageViews();
+            CreateDepthResources();
 
             _log.Debug("Vulkan", $"Swapchain recreated at {_swapchainExtent.Width}x{_swapchainExtent.Height}.");
         }
 
         private void DestroySwapchain()
         {
+            DestroyDepthResources();
+
             foreach (var view in _swapchainImageViews)
             {
                 _vk.DestroyImageView(_device, view, null);
@@ -990,8 +1027,10 @@ namespace RP.Game.Graphics.Vulkan
 
             _vk.DestroyCommandPool(_device, _commandPool, null);
 
-            if (_triangleVertexBuffer.Handle != 0) _vk.DestroyBuffer(_device, _triangleVertexBuffer, null);
-            if (_triangleVertexMemory.Handle != 0) _vk.FreeMemory(_device, _triangleVertexMemory, null);
+            if (_meshVertexBuffer.Handle != 0) _vk.DestroyBuffer(_device, _meshVertexBuffer, null);
+            if (_meshVertexMemory.Handle != 0) _vk.FreeMemory(_device, _meshVertexMemory, null);
+            if (_meshIndexBuffer.Handle != 0) _vk.DestroyBuffer(_device, _meshIndexBuffer, null);
+            if (_meshIndexMemory.Handle != 0) _vk.FreeMemory(_device, _meshIndexMemory, null);
 
             DestroyGraphicsPipeline();
             DestroySwapchain();

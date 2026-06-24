@@ -25,25 +25,108 @@ namespace RP.Game.Graphics.Vulkan
     /// </remarks>
     public sealed unsafe partial class VulkanRenderer
     {
-        // The Phase 1 test triangle, now living in a real device-local vertex buffer.
-        private Buffer _triangleVertexBuffer;
-        private DeviceMemory _triangleVertexMemory;
+        // The Phase 1 test mesh: a unit cube in device-local vertex + index buffers.
+        private Buffer _meshVertexBuffer;
+        private DeviceMemory _meshVertexMemory;
+        private Buffer _meshIndexBuffer;
+        private DeviceMemory _meshIndexMemory;
+        private uint _meshIndexCount;
 
         /// <summary>
-        /// Builds the test triangle's vertex buffer: three corners, each with a position (in normalised
-        /// device coordinates for now) and a colour the rasteriser blends across the face.
+        /// Builds a unit cube (centred on the origin, ±0.5) with a distinct colour and an outward normal
+        /// per face, in device-local vertex and index buffers. Each face is 4 vertices and 2 triangles;
+        /// sharing the 8 corners would break per-face normals, so we use 24 vertices (4 per face).
         /// </summary>
-        private void CreateTriangleMesh()
+        private void CreateCubeMesh()
         {
-            var vertices = new[]
+            // Eight corners of the unit cube.
+            Vector3 P(float x, float y, float z) => new Vector3(x, y, z);
+            var c000 = P(-0.5f, -0.5f, -0.5f);
+            var c100 = P(0.5f, -0.5f, -0.5f);
+            var c110 = P(0.5f, 0.5f, -0.5f);
+            var c010 = P(-0.5f, 0.5f, -0.5f);
+            var c001 = P(-0.5f, -0.5f, 0.5f);
+            var c101 = P(0.5f, -0.5f, 0.5f);
+            var c111 = P(0.5f, 0.5f, 0.5f);
+            var c011 = P(-0.5f, 0.5f, 0.5f);
+
+            // Six faces, each: four corners (CCW from outside) + outward normal + a face colour.
+            var vertices = new System.Collections.Generic.List<Vertex>(24);
+            void Face(Vector3 a, Vector3 b, Vector3 c, Vector3 d, Vector3 normal, Vector3 color)
             {
-                new Vertex(new Vector3(0.0f, -0.5f, 0.0f), new Vector3(1f, 0f, 0f)),
-                new Vertex(new Vector3(0.5f, 0.5f, 0.0f), new Vector3(0f, 1f, 0f)),
-                new Vertex(new Vector3(-0.5f, 0.5f, 0.0f), new Vector3(0f, 0f, 1f)),
+                vertices.Add(new Vertex(a, normal, color));
+                vertices.Add(new Vertex(b, normal, color));
+                vertices.Add(new Vertex(c, normal, color));
+                vertices.Add(new Vertex(d, normal, color));
+            }
+
+            Face(c001, c101, c111, c011, P(0, 0, 1), P(0.90f, 0.20f, 0.20f)); // +Z front  red
+            Face(c100, c000, c010, c110, P(0, 0, -1), P(0.20f, 0.80f, 0.30f)); // -Z back   green
+            Face(c101, c100, c110, c111, P(1, 0, 0), P(0.25f, 0.45f, 0.95f)); // +X right  blue
+            Face(c000, c001, c011, c010, P(-1, 0, 0), P(0.95f, 0.80f, 0.25f)); // -X left   yellow
+            Face(c011, c111, c110, c010, P(0, 1, 0), P(0.30f, 0.85f, 0.90f)); // +Y top    cyan
+            Face(c000, c100, c101, c001, P(0, -1, 0), P(0.90f, 0.35f, 0.85f)); // -Y bottom magenta
+
+            // Two triangles per face (0,1,2) + (0,2,3), offset by 4 per face.
+            var indices = new System.Collections.Generic.List<ushort>(36);
+            for (ushort face = 0; face < 6; face++)
+            {
+                ushort b = (ushort)(face * 4);
+                indices.Add((ushort)(b + 0));
+                indices.Add((ushort)(b + 1));
+                indices.Add((ushort)(b + 2));
+                indices.Add((ushort)(b + 0));
+                indices.Add((ushort)(b + 2));
+                indices.Add((ushort)(b + 3));
+            }
+
+            _meshIndexCount = (uint)indices.Count;
+            (_meshVertexBuffer, _meshVertexMemory) =
+                CreateDeviceLocalBuffer<Vertex>(vertices.ToArray(), BufferUsageFlags.VertexBufferBit);
+            (_meshIndexBuffer, _meshIndexMemory) =
+                CreateDeviceLocalBuffer<ushort>(indices.ToArray(), BufferUsageFlags.IndexBufferBit);
+        }
+
+        /// <summary>Creates an image and binds a fresh device-local memory block to it. Used for the depth
+        /// buffer (and, later, textures).</summary>
+        private (Image Image, DeviceMemory Memory) CreateImage(
+            uint width, uint height, Format format, ImageUsageFlags usage)
+        {
+            var imageInfo = new ImageCreateInfo
+            {
+                SType = StructureType.ImageCreateInfo,
+                ImageType = ImageType.Type2D,
+                Extent = new Extent3D(width, height, 1),
+                MipLevels = 1,
+                ArrayLayers = 1,
+                Format = format,
+                Tiling = ImageTiling.Optimal,
+                InitialLayout = ImageLayout.Undefined,
+                Usage = usage,
+                Samples = SampleCountFlags.Count1Bit,
+                SharingMode = SharingMode.Exclusive,
             };
 
-            (_triangleVertexBuffer, _triangleVertexMemory) =
-                CreateDeviceLocalBuffer<Vertex>(vertices, BufferUsageFlags.VertexBufferBit);
+            if (_vk.CreateImage(_device, in imageInfo, null, out Image image) != Result.Success)
+            {
+                throw new VulkanException("vkCreateImage failed", Result.ErrorUnknown);
+            }
+
+            _vk.GetImageMemoryRequirements(_device, image, out MemoryRequirements memReq);
+            var allocInfo = new MemoryAllocateInfo
+            {
+                SType = StructureType.MemoryAllocateInfo,
+                AllocationSize = memReq.Size,
+                MemoryTypeIndex = FindMemoryType(memReq.MemoryTypeBits, MemoryPropertyFlags.DeviceLocalBit),
+            };
+
+            if (_vk.AllocateMemory(_device, in allocInfo, null, out DeviceMemory memory) != Result.Success)
+            {
+                throw new VulkanException("vkAllocateMemory (image) failed", Result.ErrorUnknown);
+            }
+
+            _vk.BindImageMemory(_device, image, memory, 0);
+            return (image, memory);
         }
 
         /// <summary>

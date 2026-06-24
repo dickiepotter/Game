@@ -33,8 +33,8 @@ namespace RP.Game.Graphics.Vulkan
         /// </summary>
         private void CreateGraphicsPipeline()
         {
-            ShaderModule vertModule = CreateShaderModule("triangle.vert.spv");
-            ShaderModule fragModule = CreateShaderModule("triangle.frag.spv");
+            ShaderModule vertModule = CreateShaderModule("mesh.vert.spv");
+            ShaderModule fragModule = CreateShaderModule("mesh.frag.spv");
 
             // Entry-point name shared by both stages.
             byte* entryPoint = (byte*)SilkMarshal.StringToPtr("main");
@@ -64,21 +64,27 @@ namespace RP.Game.Graphics.Vulkan
                 Stride = (uint)sizeof(Vertex),
                 InputRate = VertexInputRate.Vertex,
             };
-            var attributeDescriptions = stackalloc VertexInputAttributeDescription[2];
+            // Three attributes: position @0, normal @12, colour @24 — matching the Vertex struct fields.
+            uint vec3Size = (uint)sizeof(Vector3);
+            var attributeDescriptions = stackalloc VertexInputAttributeDescription[3];
             attributeDescriptions[0] = new VertexInputAttributeDescription
             {
                 Binding = 0, Location = 0, Format = Format.R32G32B32Sfloat, Offset = 0,
             };
             attributeDescriptions[1] = new VertexInputAttributeDescription
             {
-                Binding = 0, Location = 1, Format = Format.R32G32B32Sfloat, Offset = (uint)sizeof(Vector3),
+                Binding = 0, Location = 1, Format = Format.R32G32B32Sfloat, Offset = vec3Size,
+            };
+            attributeDescriptions[2] = new VertexInputAttributeDescription
+            {
+                Binding = 0, Location = 2, Format = Format.R32G32B32Sfloat, Offset = 2 * vec3Size,
             };
             var vertexInput = new PipelineVertexInputStateCreateInfo
             {
                 SType = StructureType.PipelineVertexInputStateCreateInfo,
                 VertexBindingDescriptionCount = 1,
                 PVertexBindingDescriptions = &bindingDescription,
-                VertexAttributeDescriptionCount = 2,
+                VertexAttributeDescriptionCount = 3,
                 PVertexAttributeDescriptions = attributeDescriptions,
             };
 
@@ -140,25 +146,45 @@ namespace RP.Game.Graphics.Vulkan
                 PDynamicStates = dynamicStates,
             };
 
-            // Empty layout — no descriptor sets or push constants yet.
+            // One push-constant range: 128 bytes (two mat4 — MVP and model) visible to the vertex stage.
+            // Push constants are the cheapest way to feed a few per-draw values, no descriptor sets needed.
+            var pushRange = new PushConstantRange
+            {
+                StageFlags = ShaderStageFlags.VertexBit,
+                Offset = 0,
+                Size = 2 * 16 * sizeof(float),
+            };
             var layoutInfo = new PipelineLayoutCreateInfo
             {
                 SType = StructureType.PipelineLayoutCreateInfo,
                 SetLayoutCount = 0,
-                PushConstantRangeCount = 0,
+                PushConstantRangeCount = 1,
+                PPushConstantRanges = &pushRange,
             };
             if (_vk.CreatePipelineLayout(_device, in layoutInfo, null, out _pipelineLayout) != Result.Success)
             {
                 throw new VulkanException("vkCreatePipelineLayout failed", Result.ErrorUnknown);
             }
 
-            // Dynamic rendering: tell the pipeline the colour format it will render to (no render pass).
+            // Dynamic rendering: tell the pipeline the attachment formats it will render to (no render pass).
             Format colorFormat = _swapchainFormat;
             var renderingCreateInfo = new PipelineRenderingCreateInfo
             {
                 SType = StructureType.PipelineRenderingCreateInfo,
                 ColorAttachmentCount = 1,
                 PColorAttachmentFormats = &colorFormat,
+                DepthAttachmentFormat = _depthFormat,
+            };
+
+            // Depth test on, writing nearer fragments and rejecting farther ones (standard opaque draw).
+            var depthStencil = new PipelineDepthStencilStateCreateInfo
+            {
+                SType = StructureType.PipelineDepthStencilStateCreateInfo,
+                DepthTestEnable = true,
+                DepthWriteEnable = true,
+                DepthCompareOp = CompareOp.LessOrEqual,
+                DepthBoundsTestEnable = false,
+                StencilTestEnable = false,
             };
 
             var pipelineInfo = new GraphicsPipelineCreateInfo
@@ -172,6 +198,7 @@ namespace RP.Game.Graphics.Vulkan
                 PViewportState = &viewportState,
                 PRasterizationState = &rasterizer,
                 PMultisampleState = &multisampling,
+                PDepthStencilState = &depthStencil,
                 PColorBlendState = &colorBlending,
                 PDynamicState = &dynamicState,
                 Layout = _pipelineLayout,
@@ -232,10 +259,10 @@ namespace RP.Game.Graphics.Vulkan
         }
 
         /// <summary>
-        /// Records the triangle draw inside an active dynamic-rendering scope: set the (dynamic) viewport
-        /// and scissor to the current swapchain size, bind the pipeline, and draw 3 vertices.
+        /// Records the cube draw inside an active dynamic-rendering scope: set the (dynamic) viewport and
+        /// scissor, push the MVP + model matrices, bind the vertex and index buffers, and draw indexed.
         /// </summary>
-        private void RecordTriangle(CommandBuffer cb)
+        private void RecordMesh(CommandBuffer cb)
         {
             var viewport = new Viewport
             {
@@ -253,11 +280,23 @@ namespace RP.Game.Graphics.Vulkan
 
             _vk.CmdBindPipeline(cb, PipelineBindPoint.Graphics, _graphicsPipeline);
 
-            Buffer vertexBuffer = _triangleVertexBuffer;
+            // Push the two matrices the shader needs: MVP = (clip · proj · view) · model, and model alone
+            // (for orienting normals). Flatten both to column-major floats for GLSL.
+            Matrix model = ModelTransform;
+            Matrix mvp = Camera.ViewProjection * model;
+
+            float* push = stackalloc float[32];
+            var span = new Span<float>(push, 32);
+            Camera.ToColumnMajorFloats(mvp, span.Slice(0, 16));
+            Camera.ToColumnMajorFloats(model, span.Slice(16, 16));
+            _vk.CmdPushConstants(cb, _pipelineLayout, ShaderStageFlags.VertexBit, 0, 32 * sizeof(float), push);
+
+            Buffer vertexBuffer = _meshVertexBuffer;
             ulong offset = 0;
             _vk.CmdBindVertexBuffers(cb, 0, 1, in vertexBuffer, in offset);
+            _vk.CmdBindIndexBuffer(cb, _meshIndexBuffer, 0, IndexType.Uint16);
 
-            _vk.CmdDraw(cb, vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
+            _vk.CmdDrawIndexed(cb, _meshIndexCount, 1, 0, 0, 0);
         }
 
         private void DestroyGraphicsPipeline()
