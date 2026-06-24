@@ -137,6 +137,7 @@ namespace RP.Game.Graphics.Vulkan
             CreateCommandPool();
             CreateCommandBuffers();
             CreateCubeMesh(); // needs the command pool + graphics queue for the staging upload
+            CreateInstanceGrid();
             CreateSyncObjects();
 
             _log.Info("Vulkan", $"Renderer up: {_swapchainImages.Length} swapchain images at " +
@@ -1031,6 +1032,8 @@ namespace RP.Game.Graphics.Vulkan
             if (_meshVertexMemory.Handle != 0) _vk.FreeMemory(_device, _meshVertexMemory, null);
             if (_meshIndexBuffer.Handle != 0) _vk.DestroyBuffer(_device, _meshIndexBuffer, null);
             if (_meshIndexMemory.Handle != 0) _vk.FreeMemory(_device, _meshIndexMemory, null);
+            if (_instanceBuffer.Handle != 0) _vk.DestroyBuffer(_device, _instanceBuffer, null);
+            if (_instanceMemory.Handle != 0) _vk.FreeMemory(_device, _instanceMemory, null);
 
             DestroyGraphicsPipeline();
             DestroySwapchain();

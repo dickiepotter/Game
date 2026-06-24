@@ -32,6 +32,42 @@ namespace RP.Game.Graphics.Vulkan
         private DeviceMemory _meshIndexMemory;
         private uint _meshIndexCount;
 
+        // Phase 2 instancing: a per-instance buffer (offset + colour) drawn in one instanced draw call.
+        private Buffer _instanceBuffer;
+        private DeviceMemory _instanceMemory;
+        private uint _instanceCount;
+
+        /// <summary>
+        /// Builds a 3D grid of cube instances centred on the origin — the Phase 2 "thousands of instanced
+        /// objects" load. Each instance gets a world offset and a colour that varies smoothly across the
+        /// grid, so the field is easy to read on screen.
+        /// </summary>
+        private void CreateInstanceGrid(int countPerAxis = 16, float spacing = 2.0f)
+        {
+            int n = countPerAxis;
+            float half = (n - 1) * spacing * 0.5f;
+            var instances = new System.Collections.Generic.List<InstanceData>(n * n * n);
+
+            for (int x = 0; x < n; x++)
+            {
+                for (int y = 0; y < n; y++)
+                {
+                    for (int z = 0; z < n; z++)
+                    {
+                        var offset = new Vector3(x * spacing - half, y * spacing - half, z * spacing - half);
+                        var color = new Vector3((float)x / (n - 1), (float)y / (n - 1), (float)z / (n - 1));
+                        instances.Add(new InstanceData(offset, color));
+                    }
+                }
+            }
+
+            _instanceCount = (uint)instances.Count;
+            (_instanceBuffer, _instanceMemory) =
+                CreateDeviceLocalBuffer<InstanceData>(instances.ToArray(), BufferUsageFlags.VertexBufferBit);
+
+            _log.Info("Vulkan", $"Instance grid: {_instanceCount} cubes rendered in one instanced draw.");
+        }
+
         /// <summary>
         /// Builds a unit cube (centred on the origin, ±0.5) with a distinct colour and an outward normal
         /// per face, in device-local vertex and index buffers. Each face is 4 vertices and 2 triangles;

@@ -58,15 +58,21 @@ namespace RP.Game.Graphics.Vulkan
             // Vertex input: one buffer binding holding tightly-packed Vertex structs, with two attributes
             // (position at offset 0, colour after it). These must mirror the `Vertex` struct and the
             // shader's `layout(location = …) in` declarations exactly.
-            var bindingDescription = new VertexInputBindingDescription
-            {
-                Binding = 0,
-                Stride = (uint)sizeof(Vertex),
-                InputRate = VertexInputRate.Vertex,
-            };
-            // Three attributes: position @0, normal @12, colour @24 — matching the Vertex struct fields.
             uint vec3Size = (uint)sizeof(Vector3);
-            var attributeDescriptions = stackalloc VertexInputAttributeDescription[3];
+
+            // Two bindings: binding 0 steps per vertex (the cube), binding 1 steps per instance (grid).
+            var bindingDescriptions = stackalloc VertexInputBindingDescription[2];
+            bindingDescriptions[0] = new VertexInputBindingDescription
+            {
+                Binding = 0, Stride = (uint)sizeof(Vertex), InputRate = VertexInputRate.Vertex,
+            };
+            bindingDescriptions[1] = new VertexInputBindingDescription
+            {
+                Binding = 1, Stride = (uint)sizeof(InstanceData), InputRate = VertexInputRate.Instance,
+            };
+
+            // Per-vertex: position @0, normal @12, colour @24. Per-instance: offset @0, colour @12.
+            var attributeDescriptions = stackalloc VertexInputAttributeDescription[5];
             attributeDescriptions[0] = new VertexInputAttributeDescription
             {
                 Binding = 0, Location = 0, Format = Format.R32G32B32Sfloat, Offset = 0,
@@ -79,12 +85,20 @@ namespace RP.Game.Graphics.Vulkan
             {
                 Binding = 0, Location = 2, Format = Format.R32G32B32Sfloat, Offset = 2 * vec3Size,
             };
+            attributeDescriptions[3] = new VertexInputAttributeDescription
+            {
+                Binding = 1, Location = 3, Format = Format.R32G32B32Sfloat, Offset = 0,
+            };
+            attributeDescriptions[4] = new VertexInputAttributeDescription
+            {
+                Binding = 1, Location = 4, Format = Format.R32G32B32Sfloat, Offset = vec3Size,
+            };
             var vertexInput = new PipelineVertexInputStateCreateInfo
             {
                 SType = StructureType.PipelineVertexInputStateCreateInfo,
-                VertexBindingDescriptionCount = 1,
-                PVertexBindingDescriptions = &bindingDescription,
-                VertexAttributeDescriptionCount = 3,
+                VertexBindingDescriptionCount = 2,
+                PVertexBindingDescriptions = bindingDescriptions,
+                VertexAttributeDescriptionCount = 5,
                 PVertexAttributeDescriptions = attributeDescriptions,
             };
 
@@ -280,23 +294,24 @@ namespace RP.Game.Graphics.Vulkan
 
             _vk.CmdBindPipeline(cb, PipelineBindPoint.Graphics, _graphicsPipeline);
 
-            // Push the two matrices the shader needs: MVP = (clip · proj · view) · model, and model alone
-            // (for orienting normals). Flatten both to column-major floats for GLSL.
-            Matrix model = ModelTransform;
-            Matrix mvp = Camera.ViewProjection * model;
+            // Push the camera's view-projection and the shared spin (both flattened to GLSL column-major).
+            Matrix viewProj = Camera.ViewProjection;
+            Matrix spin = ModelTransform;
 
             float* push = stackalloc float[32];
             var span = new Span<float>(push, 32);
-            Camera.ToColumnMajorFloats(mvp, span.Slice(0, 16));
-            Camera.ToColumnMajorFloats(model, span.Slice(16, 16));
+            Camera.ToColumnMajorFloats(viewProj, span.Slice(0, 16));
+            Camera.ToColumnMajorFloats(spin, span.Slice(16, 16));
             _vk.CmdPushConstants(cb, _pipelineLayout, ShaderStageFlags.VertexBit, 0, 32 * sizeof(float), push);
 
-            Buffer vertexBuffer = _meshVertexBuffer;
-            ulong offset = 0;
-            _vk.CmdBindVertexBuffers(cb, 0, 1, in vertexBuffer, in offset);
+            // Bind binding 0 (cube vertices) and binding 1 (per-instance data) in one call.
+            var vertexBuffers = stackalloc Buffer[2] { _meshVertexBuffer, _instanceBuffer };
+            var offsets = stackalloc ulong[2] { 0, 0 };
+            _vk.CmdBindVertexBuffers(cb, 0, 2, vertexBuffers, offsets);
             _vk.CmdBindIndexBuffer(cb, _meshIndexBuffer, 0, IndexType.Uint16);
 
-            _vk.CmdDrawIndexed(cb, _meshIndexCount, 1, 0, 0, 0);
+            // One instanced draw renders the whole grid: indexCount indices × instanceCount instances.
+            _vk.CmdDrawIndexed(cb, _meshIndexCount, _instanceCount, 0, 0, 0);
         }
 
         private void DestroyGraphicsPipeline()
