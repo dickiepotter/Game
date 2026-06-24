@@ -125,6 +125,7 @@ namespace RP.Game.Graphics.Vulkan
             CreateGraphicsPipeline();
             CreateCommandPool();
             CreateCommandBuffers();
+            CreateTriangleMesh(); // needs the command pool + graphics queue for the staging upload
             CreateSyncObjects();
 
             _log.Info("Vulkan", $"Renderer up: {_swapchainImages.Length} swapchain images at " +
@@ -988,6 +989,9 @@ namespace RP.Game.Graphics.Vulkan
             }
 
             _vk.DestroyCommandPool(_device, _commandPool, null);
+
+            if (_triangleVertexBuffer.Handle != 0) _vk.DestroyBuffer(_device, _triangleVertexBuffer, null);
+            if (_triangleVertexMemory.Handle != 0) _vk.FreeMemory(_device, _triangleVertexMemory, null);
 
             DestroyGraphicsPipeline();
             DestroySwapchain();

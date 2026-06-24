@@ -3,8 +3,11 @@ namespace RP.Game.Graphics.Vulkan
     using System;
     using System.IO;
     using System.Reflection;
+    using RP.Game.Rendering;
+    using RP.Math;
     using Silk.NET.Core.Native;
     using Silk.NET.Vulkan;
+    using Buffer = Silk.NET.Vulkan.Buffer;
 
     /// <summary>
     /// Phase 1: the graphics pipeline and the test triangle. Split into its own file because the device
@@ -52,12 +55,31 @@ namespace RP.Game.Graphics.Vulkan
                 PName = entryPoint,
             };
 
-            // No vertex buffers yet — the triangle's vertices live in the shader (Phase 1 step 1).
+            // Vertex input: one buffer binding holding tightly-packed Vertex structs, with two attributes
+            // (position at offset 0, colour after it). These must mirror the `Vertex` struct and the
+            // shader's `layout(location = …) in` declarations exactly.
+            var bindingDescription = new VertexInputBindingDescription
+            {
+                Binding = 0,
+                Stride = (uint)sizeof(Vertex),
+                InputRate = VertexInputRate.Vertex,
+            };
+            var attributeDescriptions = stackalloc VertexInputAttributeDescription[2];
+            attributeDescriptions[0] = new VertexInputAttributeDescription
+            {
+                Binding = 0, Location = 0, Format = Format.R32G32B32Sfloat, Offset = 0,
+            };
+            attributeDescriptions[1] = new VertexInputAttributeDescription
+            {
+                Binding = 0, Location = 1, Format = Format.R32G32B32Sfloat, Offset = (uint)sizeof(Vector3),
+            };
             var vertexInput = new PipelineVertexInputStateCreateInfo
             {
                 SType = StructureType.PipelineVertexInputStateCreateInfo,
-                VertexBindingDescriptionCount = 0,
-                VertexAttributeDescriptionCount = 0,
+                VertexBindingDescriptionCount = 1,
+                PVertexBindingDescriptions = &bindingDescription,
+                VertexAttributeDescriptionCount = 2,
+                PVertexAttributeDescriptions = attributeDescriptions,
             };
 
             var inputAssembly = new PipelineInputAssemblyStateCreateInfo
@@ -230,6 +252,11 @@ namespace RP.Game.Graphics.Vulkan
             _vk.CmdSetScissor(cb, 0, 1, in scissor);
 
             _vk.CmdBindPipeline(cb, PipelineBindPoint.Graphics, _graphicsPipeline);
+
+            Buffer vertexBuffer = _triangleVertexBuffer;
+            ulong offset = 0;
+            _vk.CmdBindVertexBuffers(cb, 0, 1, in vertexBuffer, in offset);
+
             _vk.CmdDraw(cb, vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
         }
 
