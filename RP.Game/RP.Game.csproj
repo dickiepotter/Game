@@ -41,4 +41,46 @@
     <PackageReference Include="Silk.NET.Windowing" Version="2.23.0" />
   </ItemGroup>
 
+  <!-- Shader sources authored in GLSL; compiled offline to SPIR-V by the Vulkan SDK's glslc and then
+       *embedded* into RP.Game.dll, so the bytecode travels with the assembly (no loose files to copy to
+       each consumer's output). Build brief S4.2: shaders compile to SPIR-V as a build step. -->
+  <ItemGroup>
+    <ShaderSource Include="Rendering/Shaders/**/*.vert;Rendering/Shaders/**/*.frag;Rendering/Shaders/**/*.comp" />
+    <!-- Surface the .glsl sources in the IDE without compiling them as anything else. -->
+    <None Include="@(ShaderSource)" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <!-- Locate glslc: prefer the VULKAN_SDK env var; fall back to the known install if it is not yet
+         exported in this shell. Generalise the fallback if the SDK ever moves (recorded in BUILD_LOG). -->
+    <VulkanSdkDir Condition="'$(VULKAN_SDK)' != ''">$(VULKAN_SDK)</VulkanSdkDir>
+    <VulkanSdkDir Condition="'$(VulkanSdkDir)' == '' and Exists('C:\VulkanSDK\1.4.350.0')">C:\VulkanSDK\1.4.350.0</VulkanSdkDir>
+    <Glslc>$(VulkanSdkDir)\Bin\glslc.exe</Glslc>
+    <SpirvDir>$(IntermediateOutputPath)shaders\</SpirvDir>
+  </PropertyGroup>
+
+  <!-- Compile GLSL -> SPIR-V. Incremental (Inputs/Outputs): only recompiles changed shaders. -->
+  <Target Name="CompileShaders"
+          BeforeTargets="AssignTargetPaths"
+          Inputs="@(ShaderSource)"
+          Outputs="@(ShaderSource->'$(SpirvDir)%(Filename)%(Extension).spv')">
+    <Error Condition="!Exists('$(Glslc)')"
+           Text="glslc not found at '$(Glslc)'. Install the Vulkan SDK or set VULKAN_SDK." />
+    <MakeDir Directories="$(SpirvDir)" />
+    <Exec Command="&quot;$(Glslc)&quot; --target-env=vulkan1.3 &quot;%(ShaderSource.FullPath)&quot; -o &quot;$(SpirvDir)%(ShaderSource.Filename)%(ShaderSource.Extension).spv&quot;" />
+  </Target>
+
+  <!-- Embed the compiled SPIR-V into the assembly. Runs *every* build (no Inputs/Outputs) and before
+       AssignTargetPaths, so the manifest-name pass always sees the resources even when CompileShaders
+       was skipped as up-to-date. LogicalName is what the renderer loads by (e.g. "triangle.vert.spv"). -->
+  <Target Name="EmbedShaders" BeforeTargets="AssignTargetPaths" DependsOnTargets="CompileShaders">
+    <ItemGroup>
+      <!-- Batch over ShaderSource so both the path and the LogicalName derive from the *source* metadata
+           (Filename="triangle", Extension=".vert"), giving deterministic names like "triangle.vert.spv". -->
+      <EmbeddedResource Include="$(SpirvDir)%(ShaderSource.Filename)%(ShaderSource.Extension).spv">
+        <LogicalName>%(ShaderSource.Filename)%(ShaderSource.Extension).spv</LogicalName>
+      </EmbeddedResource>
+    </ItemGroup>
+  </Target>
+
 </Project>

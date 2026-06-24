@@ -39,7 +39,7 @@ namespace RP.Game.Graphics.Vulkan
     /// <para>This single file keeps the whole spine together while it is small enough to read end-to-end;
     /// as rendering grows (Phase 1+) the swapchain, device and sync split into their own files.</para>
     /// </remarks>
-    public sealed unsafe class VulkanRenderer : IRenderer
+    public sealed unsafe partial class VulkanRenderer : IRenderer
     {
         // How many frames the CPU may be recording ahead of the GPU. Two ("double buffering") lets the
         // CPU build frame N+1 while the GPU still draws frame N, without them sharing mutable state.
@@ -122,6 +122,7 @@ namespace RP.Game.Graphics.Vulkan
             CreateLogicalDevice();
             CreateSwapchain();
             CreateImageViews();
+            CreateGraphicsPipeline();
             CreateCommandPool();
             CreateCommandBuffers();
             CreateSyncObjects();
@@ -880,7 +881,7 @@ namespace RP.Game.Graphics.Vulkan
             };
 
             _vk.CmdBeginRendering(cb, in renderingInfo);
-            // Nothing to draw yet — the clear is the whole frame at Phase 0.
+            RecordTriangle(cb); // Phase 1: draw the test triangle through the graphics pipeline.
             _vk.CmdEndRendering(cb);
 
             // COLOR_ATTACHMENT_OPTIMAL -> PRESENT_SRC: make it safe for the OS to display.
@@ -988,6 +989,7 @@ namespace RP.Game.Graphics.Vulkan
 
             _vk.DestroyCommandPool(_device, _commandPool, null);
 
+            DestroyGraphicsPipeline();
             DestroySwapchain();
 
             _vk.DestroyDevice(_device, null);
