@@ -22,11 +22,23 @@
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
+
+    <!-- Vulkan is a C API: creating objects means filling structs and passing pointers to them. Silk.NET
+         surfaces that faithfully, so the backend uses `unsafe` blocks (stack-allocated structs, pinned
+         strings, pointer fields). This is confined to RP.Game.Graphics.Vulkan; nothing above it is unsafe. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
     <!-- Dependency direction is strictly upward: Game depends on Math, never the reverse. -->
     <ProjectReference Include="..\..\Math\RP.Math\RP.Math.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Silk.NET.Vulkan" Version="2.23.0" />
+    <PackageReference Include="Silk.NET.Vulkan.Extensions.EXT" Version="2.23.0" />
+    <PackageReference Include="Silk.NET.Vulkan.Extensions.KHR" Version="2.23.0" />
+    <PackageReference Include="Silk.NET.Windowing" Version="2.23.0" />
   </ItemGroup>
 
 </Project>
