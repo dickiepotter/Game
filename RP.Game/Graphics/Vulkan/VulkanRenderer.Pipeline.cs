@@ -304,14 +304,14 @@ namespace RP.Game.Graphics.Vulkan
             Camera.ToColumnMajorFloats(spin, span.Slice(16, 16));
             _vk.CmdPushConstants(cb, _pipelineLayout, ShaderStageFlags.VertexBit, 0, 32 * sizeof(float), push);
 
-            // Bind binding 0 (cube vertices) and binding 1 (per-instance data) in one call.
-            var vertexBuffers = stackalloc Buffer[2] { _meshVertexBuffer, _instanceBuffer };
+            // Bind binding 0 (cube vertices) and binding 1 (this frame's culled per-instance data).
+            var vertexBuffers = stackalloc Buffer[2] { _meshVertexBuffer, _dynamicInstanceBuffers[_currentFrame] };
             var offsets = stackalloc ulong[2] { 0, 0 };
             _vk.CmdBindVertexBuffers(cb, 0, 2, vertexBuffers, offsets);
             _vk.CmdBindIndexBuffer(cb, _meshIndexBuffer, 0, IndexType.Uint16);
 
-            // One instanced draw renders the whole grid: indexCount indices × instanceCount instances.
-            _vk.CmdDrawIndexed(cb, _meshIndexCount, _instanceCount, 0, 0, 0);
+            // One instanced draw renders every visible instance: indexCount × visibleInstanceCount.
+            _vk.CmdDrawIndexed(cb, _meshIndexCount, _visibleInstanceCount, 0, 0, 0);
         }
 
         private void DestroyGraphicsPipeline()

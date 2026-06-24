@@ -67,6 +67,17 @@ namespace RP.Game.Rendering
         public Matrix ViewProjection => Projection * View;
 
         /// <summary>
+        /// The view-projection used for <b>culling</b> — the plain OpenGL-convention matrix <i>without</i>
+        /// the Vulkan clip correction. Culling happens in world space and must not depend on the Y-flip /
+        /// depth remap, which only affect how the final image is presented.
+        /// </summary>
+        public Matrix CullingViewProjection =>
+            Matrix.PerspectiveFieldOfView(FieldOfView, AspectRatio, NearPlane, FarPlane) * View;
+
+        /// <summary>The camera's view frustum in world space — the six planes bounding what it can see.</summary>
+        public Frustum Frustum => Frustum.FromViewProjection(CullingViewProjection);
+
+        /// <summary>
         /// Flattens a 4×4 RP.Math matrix into 16 floats in <b>column-major</b> order — the layout GLSL's
         /// <c>mat4</c> expects. RP.Math exposes elements as <c>m[row, col]</c> with the column-vector
         /// convention (<c>v' = M·v</c>), which matches GLSL's convention; only the storage order differs,

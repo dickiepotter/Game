@@ -802,6 +802,10 @@ namespace RP.Game.Graphics.Vulkan
             // frame would leave it unsignalled and the next wait would hang).
             _vk.ResetFences(_device, 1, in fence);
 
+            // The fence wait above guarantees this frame slot's previous GPU work is done, so it is safe to
+            // overwrite this slot's instance buffer with the freshly-culled set.
+            CullAndUploadInstances(_currentFrame);
+
             CommandBuffer cb = _commandBuffers[_currentFrame];
             _vk.ResetCommandBuffer(cb, 0);
             RecordClearCommands(cb, imageIndex);
@@ -1032,8 +1036,7 @@ namespace RP.Game.Graphics.Vulkan
             if (_meshVertexMemory.Handle != 0) _vk.FreeMemory(_device, _meshVertexMemory, null);
             if (_meshIndexBuffer.Handle != 0) _vk.DestroyBuffer(_device, _meshIndexBuffer, null);
             if (_meshIndexMemory.Handle != 0) _vk.FreeMemory(_device, _meshIndexMemory, null);
-            if (_instanceBuffer.Handle != 0) _vk.DestroyBuffer(_device, _instanceBuffer, null);
-            if (_instanceMemory.Handle != 0) _vk.FreeMemory(_device, _instanceMemory, null);
+            DestroyDynamicInstances();
 
             DestroyGraphicsPipeline();
             DestroySwapchain();

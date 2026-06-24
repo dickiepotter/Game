@@ -32,15 +32,25 @@ namespace RP.Game.Graphics.Vulkan
         private DeviceMemory _meshIndexMemory;
         private uint _meshIndexCount;
 
-        // Phase 2 instancing: a per-instance buffer (offset + colour) drawn in one instanced draw call.
-        private Buffer _instanceBuffer;
-        private DeviceMemory _instanceMemory;
-        private uint _instanceCount;
+        // Phase 2 instancing + culling. The full grid lives on the CPU (_instanceMaster); each frame we
+        // cull it to the camera frustum into _cullScratch and copy the survivors into that frame's own
+        // host-visible, persistently-mapped instance buffer (one per frame-in-flight, so the CPU never
+        // overwrites data the GPU is still reading).
+        private InstanceData[] _instanceMaster = System.Array.Empty<InstanceData>();
+        private InstanceData[] _cullScratch = System.Array.Empty<InstanceData>();
+        private readonly Buffer[] _dynamicInstanceBuffers = new Buffer[MaxFramesInFlight];
+        private readonly DeviceMemory[] _dynamicInstanceMemories = new DeviceMemory[MaxFramesInFlight];
+        private readonly nint[] _dynamicInstanceMapped = new nint[MaxFramesInFlight];
+        private uint _visibleInstanceCount;
+        private bool _loggedCull;
+
+        // The unit cube's circumradius (sqrt(3)/2): the smallest sphere that contains it in any orientation,
+        // so it stays a correct bound while the cube spins.
+        private const float CubeBoundingRadius = 0.8660254f;
 
         /// <summary>
         /// Builds a 3D grid of cube instances centred on the origin — the Phase 2 "thousands of instanced
-        /// objects" load. Each instance gets a world offset and a colour that varies smoothly across the
-        /// grid, so the field is easy to read on screen.
+        /// objects" load — and the per-frame buffers the culled survivors are streamed into.
         /// </summary>
         private void CreateInstanceGrid(int countPerAxis = 16, float spacing = 2.0f)
         {
@@ -61,11 +71,68 @@ namespace RP.Game.Graphics.Vulkan
                 }
             }
 
-            _instanceCount = (uint)instances.Count;
-            (_instanceBuffer, _instanceMemory) =
-                CreateDeviceLocalBuffer<InstanceData>(instances.ToArray(), BufferUsageFlags.VertexBufferBit);
+            _instanceMaster = instances.ToArray();
+            _cullScratch = new InstanceData[_instanceMaster.Length];
 
-            _log.Info("Vulkan", $"Instance grid: {_instanceCount} cubes rendered in one instanced draw.");
+            // One host-visible, persistently-mapped instance buffer per frame in flight.
+            ulong capacity = (ulong)(_instanceMaster.Length * sizeof(InstanceData));
+            for (int i = 0; i < MaxFramesInFlight; i++)
+            {
+                (_dynamicInstanceBuffers[i], _dynamicInstanceMemories[i]) = CreateBuffer(
+                    capacity,
+                    BufferUsageFlags.VertexBufferBit,
+                    MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit);
+
+                void* mapped;
+                _vk.MapMemory(_device, _dynamicInstanceMemories[i], 0, capacity, 0, &mapped);
+                _dynamicInstanceMapped[i] = (nint)mapped;
+            }
+
+            _log.Info("Vulkan", $"Instance grid: {_instanceMaster.Length} cubes, frustum-culled each frame.");
+        }
+
+        /// <summary>
+        /// Culls the master grid against the camera frustum and copies the survivors into the given
+        /// frame's mapped instance buffer. Sets <see cref="_visibleInstanceCount"/> for the draw call.
+        /// </summary>
+        private void CullAndUploadInstances(int frameIndex)
+        {
+            Frustum frustum = Camera.Frustum;
+            int visible = Scene.FrustumCuller.Cull(frustum, _instanceMaster, CubeBoundingRadius, _cullScratch);
+            _visibleInstanceCount = (uint)visible;
+
+            if (visible > 0)
+            {
+                ulong bytes = (ulong)(visible * sizeof(InstanceData));
+                ulong capacity = (ulong)(_instanceMaster.Length * sizeof(InstanceData));
+                fixed (InstanceData* src = _cullScratch)
+                {
+                    System.Buffer.MemoryCopy(src, (void*)_dynamicInstanceMapped[frameIndex], capacity, bytes);
+                }
+            }
+
+            if (!_loggedCull)
+            {
+                _log.Info("Vulkan", $"Frustum culling: {visible}/{_instanceMaster.Length} instances visible this frame.");
+                _loggedCull = true;
+            }
+        }
+
+        private void DestroyDynamicInstances()
+        {
+            for (int i = 0; i < MaxFramesInFlight; i++)
+            {
+                if (_dynamicInstanceMemories[i].Handle != 0)
+                {
+                    _vk.UnmapMemory(_device, _dynamicInstanceMemories[i]);
+                    _vk.FreeMemory(_device, _dynamicInstanceMemories[i], null);
+                }
+
+                if (_dynamicInstanceBuffers[i].Handle != 0)
+                {
+                    _vk.DestroyBuffer(_device, _dynamicInstanceBuffers[i], null);
+                }
+            }
         }
 
         /// <summary>
