@@ -36,7 +36,8 @@ namespace RP.Game.Graphics.Vulkan
         // cull it to the camera frustum into _cullScratch and copy the survivors into that frame's own
         // host-visible, persistently-mapped instance buffer (one per frame-in-flight, so the CPU never
         // overwrites data the GPU is still reading).
-        private InstanceData[] _instanceMaster = System.Array.Empty<InstanceData>();
+        private InstanceData[] _instanceMaster = System.Array.Empty<InstanceData>();   // true-space offsets
+        private InstanceData[] _renderInstances = System.Array.Empty<InstanceData>();  // rebased to render space
         private InstanceData[] _cullScratch = System.Array.Empty<InstanceData>();
         private readonly Buffer[] _dynamicInstanceBuffers = new Buffer[MaxFramesInFlight];
         private readonly DeviceMemory[] _dynamicInstanceMemories = new DeviceMemory[MaxFramesInFlight];
@@ -72,6 +73,7 @@ namespace RP.Game.Graphics.Vulkan
             }
 
             _instanceMaster = instances.ToArray();
+            _renderInstances = new InstanceData[_instanceMaster.Length];
             _cullScratch = new InstanceData[_instanceMaster.Length];
 
             // One host-visible, persistently-mapped instance buffer per frame in flight.
@@ -97,8 +99,16 @@ namespace RP.Game.Graphics.Vulkan
         /// </summary>
         private void CullAndUploadInstances(int frameIndex)
         {
+            // Rebase every instance from true world space into render space (subtract the floating origin),
+            // so culling and drawing happen in the small-coordinate space centred on the player.
+            for (int i = 0; i < _instanceMaster.Length; i++)
+            {
+                var renderOffset = (Vector3)((Vector3d)_instanceMaster[i].Offset - RenderOrigin);
+                _renderInstances[i] = new InstanceData(renderOffset, _instanceMaster[i].Color);
+            }
+
             Frustum frustum = Camera.Frustum;
-            int visible = Scene.FrustumCuller.Cull(frustum, _instanceMaster, CubeBoundingRadius, _cullScratch);
+            int visible = Scene.FrustumCuller.Cull(frustum, _renderInstances, CubeBoundingRadius, _cullScratch);
             _visibleInstanceCount = (uint)visible;
 
             if (visible > 0)

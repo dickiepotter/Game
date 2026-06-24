@@ -104,6 +104,13 @@ namespace RP.Game.Graphics.Vulkan
         public Matrix ModelTransform { get; set; } = Matrix.Identity;
 
         /// <summary>
+        /// The floating-origin offset: instances are authored in true (double) world space, and each frame
+        /// the renderer subtracts this origin so everything is drawn relative to the player. Keeping the
+        /// origin near the player keeps render coordinates small and jitter-free at any world distance.
+        /// </summary>
+        public Vector3d RenderOrigin { get; set; } = Vector3d.Origin;
+
+        /// <summary>
         /// Brings the entire Vulkan stack up against an already-initialised window.
         /// </summary>
         /// <param name="window">An initialised Vulkan window (see <see cref="Platform.VulkanWindow"/>).</param>
