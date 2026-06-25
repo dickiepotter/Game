@@ -23,12 +23,23 @@ namespace RP.Game.Rendering
     {
         /// <summary>Parses an OBJ document into a normalised, instance-ready mesh tinted with <paramref name="color"/>.</summary>
         public static Primitives.Mesh Load(string objText, Vector3 color)
+            => Load(objText, color, null, 0, 0);
+
+        /// <summary>
+        /// As <see cref="Load(string, Vector3)"/>, but when a raw-RGBA <paramref name="texRgba"/> texture is
+        /// supplied it bakes the texture's <b>luminance</b> into each vertex's colour (a touch of the material
+        /// hue kept), so the painted panel detail survives while the per-instance faction tint still colours
+        /// the hull. A pragmatic stand-in for full UV texture sampling that needs no extra GPU plumbing.
+        /// </summary>
+        public static Primitives.Mesh Load(string objText, Vector3 color, byte[]? texRgba, int texW, int texH)
         {
             var positions = new List<Vector3>();
             var normals = new List<Vector3>();
+            var texcoords = new List<Vector2>();
             var verts = new List<Vertex>();
             var indices = new List<ushort>();
-            var dedupe = new Dictionary<(int, int), ushort>();
+            var dedupe = new Dictionary<(int, int, int), ushort>();
+            byte[]? tex = (texRgba != null && texW > 0 && texH > 0 && texRgba.Length >= texW * texH * 4) ? texRgba : null;
 
             using var reader = new StringReader(objText);
             string? line;
@@ -44,9 +55,13 @@ namespace RP.Game.Rendering
                 {
                     normals.Add(ParseVec3(line));
                 }
+                else if (c0 == 'v' && line[1] == 't')
+                {
+                    texcoords.Add(ParseVec2(line));
+                }
                 else if (c0 == 'f' && line[1] == ' ')
                 {
-                    ParseFace(line, positions, normals, verts, indices, dedupe);
+                    ParseFace(line, positions, normals, texcoords, verts, indices, dedupe, color, tex, texW, texH);
                 }
             }
 
@@ -66,8 +81,9 @@ namespace RP.Game.Rendering
         }
 
         private static void ParseFace(
-            string line, List<Vector3> positions, List<Vector3> normals,
-            List<Vertex> verts, List<ushort> indices, Dictionary<(int, int), ushort> dedupe)
+            string line, List<Vector3> positions, List<Vector3> normals, List<Vector2> texcoords,
+            List<Vertex> verts, List<ushort> indices, Dictionary<(int, int, int), ushort> dedupe,
+            Vector3 fallbackColor, byte[]? tex, int texW, int texH)
         {
             string[] tokens = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
             int n = tokens.Length - 1;
@@ -79,7 +95,7 @@ namespace RP.Game.Rendering
 
             for (int i = 0; i < n; i++)
             {
-                ParseCorner(tokens[i + 1], positions.Count, normals.Count, out int vi, out int ni);
+                ParseCorner(tokens[i + 1], positions.Count, texcoords.Count, normals.Count, out int vi, out int ti, out int ni);
 
                 Vector3 normal;
                 if (ni >= 0 && ni < normals.Count)
@@ -97,11 +113,21 @@ namespace RP.Game.Rendering
                     ni = -1; // key all flat-shaded corners of this face together by position only
                 }
 
-                var key = (vi, ni);
+                Vector3 vcol = fallbackColor;
+                if (tex != null && ti >= 0 && ti < texcoords.Count)
+                {
+                    vcol = SampleLuminance(tex, texW, texH, texcoords[ti]);
+                }
+                else
+                {
+                    ti = -1;
+                }
+
+                var key = (vi, ti, ni);
                 if (!dedupe.TryGetValue(key, out ushort index))
                 {
                     index = (ushort)verts.Count;
-                    verts.Add(new Vertex(positions[vi], normal, new Vector3(1f, 1f, 1f)));
+                    verts.Add(new Vertex(positions[vi], normal, vcol));
                     dedupe[key] = index;
                 }
 
@@ -118,11 +144,37 @@ namespace RP.Game.Rendering
         }
 
         // "v", "v/vt", "v//vn", "v/vt/vn" — 1-based, negatives are relative to the end.
-        private static void ParseCorner(string token, int vCount, int nCount, out int vi, out int ni)
+        private static void ParseCorner(string token, int vCount, int tCount, int nCount, out int vi, out int ti, out int ni)
         {
             string[] parts = token.Split('/');
             vi = Resolve(parts[0], vCount);
+            ti = parts.Length >= 2 && parts[1].Length > 0 ? Resolve(parts[1], tCount) : -1;
             ni = parts.Length >= 3 && parts[2].Length > 0 ? Resolve(parts[2], nCount) : -1;
+        }
+
+        private static Vector2 ParseVec2(string line)
+        {
+            string[] t = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            return new Vector2(float.Parse(t[1], CultureInfo.InvariantCulture), float.Parse(t[2], CultureInfo.InvariantCulture));
+        }
+
+        // Samples the texture's luminance at a UV (V flipped to image rows; UVs wrapped), keeping a little of
+        // the material hue. The result is the per-vertex base colour the faction tint then multiplies.
+        private static Vector3 SampleLuminance(byte[] rgba, int w, int h, Vector2 uv)
+        {
+            float u = uv.X - MathF.Floor(uv.X);
+            float v = uv.Y - MathF.Floor(uv.Y);
+            int px = Math.Clamp((int)(u * (w - 1)), 0, w - 1);
+            int py = Math.Clamp((int)((1f - v) * (h - 1)), 0, h - 1);
+            int idx = (py * w + px) * 4;
+            float r = rgba[idx] / 255f, g = rgba[idx + 1] / 255f, b = rgba[idx + 2] / 255f;
+            float lum = 0.299f * r + 0.587f * g + 0.114f * b;
+            const float hue = 0.18f; // mostly luminance, a hint of material colour
+            float scale = 1.35f;     // lift so lit hulls aren't muddy
+            return new Vector3(
+                MathF.Min(1f, (lum + (r - lum) * hue) * scale),
+                MathF.Min(1f, (lum + (g - lum) * hue) * scale),
+                MathF.Min(1f, (lum + (b - lum) * hue) * scale));
         }
 
         private static int Resolve(string s, int count)
@@ -133,9 +185,9 @@ namespace RP.Game.Rendering
 
         private static Vector3 FaceNormal(List<Vector3> positions, string[] tokens)
         {
-            ParseCorner(tokens[1], positions.Count, 0, out int a, out _);
-            ParseCorner(tokens[2], positions.Count, 0, out int b, out _);
-            ParseCorner(tokens[3], positions.Count, 0, out int c, out _);
+            ParseCorner(tokens[1], positions.Count, 0, 0, out int a, out _, out _);
+            ParseCorner(tokens[2], positions.Count, 0, 0, out int b, out _, out _);
+            ParseCorner(tokens[3], positions.Count, 0, 0, out int c, out _, out _);
             Vector3 n = Vector3.Cross(positions[b] - positions[a], positions[c] - positions[a]);
             return n.LengthSquared > 1e-12f ? n.Normalize() : new Vector3(0, 1, 0);
         }
