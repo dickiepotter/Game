@@ -160,57 +160,48 @@ namespace RP.Game.Rendering
             float longest = MathF.Max(size.X, MathF.Max(size.Y, size.Z));
             float scale = longest > 1e-6f ? 1f / longest : 1f;
 
-            // Map the model's longest axis onto Z (length), the next onto Y (up) — a stable basis for hulls
-            // exported facing any which way. Build a permutation of axes by extent.
-            int lengthAxis = LongestAxis(size);
-            int upAxis = SecondAxis(size, lengthAxis);
-            int rightAxis = 3 - lengthAxis - upAxis;
-
-            // Decide which end of the length axis is the nose: the half with the smaller cross-section.
-            float nose = NoseSign(verts, centre, lengthAxis, rightAxis, upAxis);
+            // These hulls are authored in the usual game basis: +X right, +Y up, and the long axis along Z.
+            // We do NOT permute axes (that would roll a wide-but-short fighter onto its side); we only centre,
+            // uniformly scale, and — if the nose ended up at +Z — yaw 180° so it points down −Z (forward).
+            bool flip = NoseAtPositiveZ(verts, centre, size.Z);
 
             for (int i = 0; i < verts.Length; i++)
             {
                 Vector3 p = (verts[i].Position - centre) * scale;
                 Vector3 n = verts[i].Normal;
 
-                // Reorder axes -> (right=X, up=Y, forward maps to -Z so multiply length component by -nose).
-                var rp = new Vector3(Comp(p, rightAxis), Comp(p, upAxis), Comp(p, lengthAxis) * -nose);
-                var rn = new Vector3(Comp(n, rightAxis), Comp(n, upAxis), Comp(n, lengthAxis) * -nose);
-                verts[i] = new Vertex(rp, rn.LengthSquared > 1e-12f ? rn.Normalize() : rn, verts[i].Color);
+                // 180° about Y (x→−x, z→−z) keeps handedness/winding while turning the nose to −Z.
+                if (flip)
+                {
+                    p = new Vector3(-p.X, p.Y, -p.Z);
+                    n = new Vector3(-n.X, n.Y, -n.Z);
+                }
+
+                verts[i] = new Vertex(p, n, verts[i].Color);
             }
         }
 
-        // +1 if the model's existing +length end is the nose, -1 if the -length end is. The nose is the slimmer
-        // end (smaller mean cross-sectional radius), so it tapers to a point as a ship should.
-        private static float NoseSign(Vertex[] verts, Vector3 centre, int lengthAxis, int a, int b)
+        // True if the model's nose currently points +Z (so it needs a 180° yaw to face −Z). The nose is the
+        // slimmer end of the long axis: compares the mean cross-sectional radius of the +Z third against the
+        // −Z third (the middle third is ignored, where a hull is fattest and least telling).
+        private static bool NoseAtPositiveZ(Vertex[] verts, Vector3 centre, float lengthZ)
         {
+            float band = lengthZ / 6f; // a third of the length, split either side of the centre
             double posSum = 0, negSum = 0; int posN = 0, negN = 0;
             foreach (Vertex v in verts)
             {
-                float along = Comp(v.Position, lengthAxis) - Comp(centre, lengthAxis);
-                float ca = Comp(v.Position, a) - Comp(centre, a);
-                float cb = Comp(v.Position, b) - Comp(centre, b);
-                double r = Math.Sqrt(ca * ca + cb * cb);
-                if (along >= 0) { posSum += r; posN++; } else { negSum += r; negN++; }
+                float z = v.Position.Z - centre.Z;
+                float dx = v.Position.X - centre.X, dy = v.Position.Y - centre.Y;
+                double r = Math.Sqrt(dx * dx + dy * dy);
+                if (z > band) { posSum += r; posN++; }
+                else if (z < -band) { negSum += r; negN++; }
             }
 
-            double posMean = posN > 0 ? posSum / posN : 0;
-            double negMean = negN > 0 ? negSum / negN : 0;
-            // If the +end is slimmer, it's the nose -> we want +end to map to -Z, i.e. nose = +1.
-            return posMean <= negMean ? 1f : -1f;
+            double posMean = posN > 0 ? posSum / posN : double.MaxValue;
+            double negMean = negN > 0 ? negSum / negN : double.MaxValue;
+            return posMean < negMean; // +Z end is slimmer -> nose is at +Z -> flip needed
         }
 
-        private static int LongestAxis(Vector3 s) =>
-            s.X >= s.Y && s.X >= s.Z ? 0 : (s.Y >= s.Z ? 1 : 2);
-
-        private static int SecondAxis(Vector3 s, int longest)
-        {
-            int a = (longest + 1) % 3, b = (longest + 2) % 3;
-            return Comp(s, a) >= Comp(s, b) ? a : b;
-        }
-
-        private static float Comp(Vector3 v, int axis) => axis == 0 ? v.X : (axis == 1 ? v.Y : v.Z);
         private static Vector3 Min(Vector3 a, Vector3 b) => new(MathF.Min(a.X, b.X), MathF.Min(a.Y, b.Y), MathF.Min(a.Z, b.Z));
         private static Vector3 Max(Vector3 a, Vector3 b) => new(MathF.Max(a.X, b.X), MathF.Max(a.Y, b.Y), MathF.Max(a.Z, b.Z));
     }
