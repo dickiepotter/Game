@@ -485,6 +485,15 @@ namespace RP.Game.Graphics.Vulkan
 
             // One instanced draw renders every visible instance: indexCount × visibleInstanceCount.
             _vk.CmdDrawIndexed(cb, _meshIndexCount, _visibleInstanceCount, 0, 0, 0);
+
+            // Capital ships: same pipeline + push constants, a second mesh and instance batch.
+            if (_capitalVisible > 0)
+            {
+                var capBuffers = stackalloc Buffer[2] { _capitalVertexBuffer, _capitalInstanceBuffers[_currentFrame] };
+                _vk.CmdBindVertexBuffers(cb, 0, 2, capBuffers, offsets);
+                _vk.CmdBindIndexBuffer(cb, _capitalIndexBuffer, 0, IndexType.Uint16);
+                _vk.CmdDrawIndexed(cb, _capitalIndexCount, _capitalVisible, 0, 0, 0);
+            }
         }
 
         private void DestroyGraphicsPipeline()

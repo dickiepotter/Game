@@ -32,6 +32,25 @@ namespace RP.Game.Graphics.Vulkan
         private DeviceMemory _meshIndexMemory;
         private uint _meshIndexCount;
 
+        // Capital ships: a separate, larger hull mesh drawn with the same pipeline as a second instanced batch
+        // (a handful of structures, so no culling — they are vast and almost always relevant when present).
+        private const int MaxCapitals = 16;
+        private Buffer _capitalVertexBuffer;
+        private DeviceMemory _capitalVertexMemory;
+        private Buffer _capitalIndexBuffer;
+        private DeviceMemory _capitalIndexMemory;
+        private uint _capitalIndexCount;
+        private readonly Vector3d[] _capitalWorld = new Vector3d[MaxCapitals];
+        private readonly Vector3[] _capitalColor = new Vector3[MaxCapitals];
+        private readonly float[] _capitalScale = new float[MaxCapitals];
+        private readonly Vector4[] _capitalRotation = new Vector4[MaxCapitals];
+        private int _capitalCount;
+        private readonly InstanceData[] _capitalRender = new InstanceData[MaxCapitals];
+        private readonly Buffer[] _capitalInstanceBuffers = new Buffer[MaxFramesInFlight];
+        private readonly DeviceMemory[] _capitalInstanceMemories = new DeviceMemory[MaxFramesInFlight];
+        private readonly nint[] _capitalInstanceMapped = new nint[MaxFramesInFlight];
+        private uint _capitalVisible;
+
         // Phase 2 instancing + culling, now fed from outside via SetInstances. The scene's instances live on
         // the CPU as true (double) world positions + colour + scale; each frame we rebase them to render
         // space, cull to the camera frustum into _cullScratch, and copy the survivors into that frame's own
@@ -180,6 +199,90 @@ namespace RP.Game.Graphics.Vulkan
                 CreateDeviceLocalBuffer<Vertex>(mesh.Vertices, BufferUsageFlags.VertexBufferBit);
             (_meshIndexBuffer, _meshIndexMemory) =
                 CreateDeviceLocalBuffer<ushort>(mesh.Indices, BufferUsageFlags.IndexBufferBit);
+        }
+
+        /// <summary>Uploads the capital-ship hull mesh and allocates its per-frame instance buffers.</summary>
+        private void CreateCapitalMesh()
+        {
+            Primitives.Mesh mesh = Primitives.Carrier();
+            _capitalIndexCount = (uint)mesh.Indices.Length;
+            (_capitalVertexBuffer, _capitalVertexMemory) =
+                CreateDeviceLocalBuffer<Vertex>(mesh.Vertices, BufferUsageFlags.VertexBufferBit);
+            (_capitalIndexBuffer, _capitalIndexMemory) =
+                CreateDeviceLocalBuffer<ushort>(mesh.Indices, BufferUsageFlags.IndexBufferBit);
+
+            ulong capacity = (ulong)(MaxCapitals * sizeof(InstanceData));
+            for (int i = 0; i < MaxFramesInFlight; i++)
+            {
+                (_capitalInstanceBuffers[i], _capitalInstanceMemories[i]) = CreateBuffer(
+                    capacity,
+                    BufferUsageFlags.VertexBufferBit,
+                    MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit);
+                void* mapped;
+                _vk.MapMemory(_device, _capitalInstanceMemories[i], 0, capacity, 0, &mapped);
+                _capitalInstanceMapped[i] = (nint)mapped;
+            }
+        }
+
+        /// <summary>
+        /// Supplies the capital ships drawn this frame (true world positions, colour tint, uniform scale and
+        /// orientation). Few and large, so they are not culled — every supplied capital is drawn.
+        /// </summary>
+        public void SetCapitals(
+            ReadOnlySpan<Vector3d> worldPositions, ReadOnlySpan<Vector3> colors, ReadOnlySpan<float> scales,
+            ReadOnlySpan<Vector4> rotations)
+        {
+            int count = Math.Min(worldPositions.Length, MaxCapitals);
+            for (int i = 0; i < count; i++)
+            {
+                _capitalWorld[i] = worldPositions[i];
+                _capitalColor[i] = colors[i];
+                _capitalScale[i] = scales[i];
+                _capitalRotation[i] = i < rotations.Length ? rotations[i] : Vector4.UnitW;
+            }
+
+            _capitalCount = count;
+        }
+
+        // Rebase the capital instances into render space and stream them into this frame's buffer.
+        private void UploadCapitals(int frameIndex)
+        {
+            for (int i = 0; i < _capitalCount; i++)
+            {
+                var renderOffset = (Vector3)(_capitalWorld[i] - RenderOrigin);
+                _capitalRender[i] = new InstanceData(renderOffset, _capitalColor[i], _capitalScale[i], _capitalRotation[i]);
+            }
+
+            _capitalVisible = (uint)_capitalCount;
+            if (_capitalCount == 0) return;
+
+            ulong bytes = (ulong)(_capitalCount * sizeof(InstanceData));
+            ulong capacity = (ulong)(MaxCapitals * sizeof(InstanceData));
+            fixed (InstanceData* src = _capitalRender)
+            {
+                System.Buffer.MemoryCopy(src, (void*)_capitalInstanceMapped[frameIndex], capacity, bytes);
+            }
+        }
+
+        private void DestroyCapitalResources()
+        {
+            for (int i = 0; i < MaxFramesInFlight; i++)
+            {
+                if (_capitalInstanceMemories[i].Handle != 0)
+                {
+                    _vk.UnmapMemory(_device, _capitalInstanceMemories[i]);
+                    _vk.FreeMemory(_device, _capitalInstanceMemories[i], null);
+                }
+                if (_capitalInstanceBuffers[i].Handle != 0)
+                {
+                    _vk.DestroyBuffer(_device, _capitalInstanceBuffers[i], null);
+                }
+            }
+
+            if (_capitalVertexBuffer.Handle != 0) _vk.DestroyBuffer(_device, _capitalVertexBuffer, null);
+            if (_capitalVertexMemory.Handle != 0) _vk.FreeMemory(_device, _capitalVertexMemory, null);
+            if (_capitalIndexBuffer.Handle != 0) _vk.DestroyBuffer(_device, _capitalIndexBuffer, null);
+            if (_capitalIndexMemory.Handle != 0) _vk.FreeMemory(_device, _capitalIndexMemory, null);
         }
 
         /// <summary>Creates an image and binds a fresh device-local memory block to it. Used for the depth

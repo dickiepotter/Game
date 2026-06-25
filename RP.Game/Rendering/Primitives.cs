@@ -89,6 +89,77 @@ namespace RP.Game.Rendering
             return new Mesh(v.ToArray(), idx.ToArray());
         }
 
+        /// <summary>
+        /// A capital ship — a long faceted hull with a raised command tower, engine block, and an
+        /// <b>open hangar bay</b> at the bow (−Z) lined with emissive panels, so it reads as a structure you
+        /// can fly toward and <i>into</i>. Authored a few units long about the origin (≈3×1×0.7) so a uniform
+        /// per-instance scale maps to "scale ≈ hull length ÷ 3"; the game decides this hull "is" a carrier.
+        /// </summary>
+        public static Mesh Carrier()
+        {
+            var v = new List<Vertex>(256);
+            var idx = new List<ushort>(384);
+
+            void Quad(Vector3 a, Vector3 b, Vector3 c, Vector3 d, Vector3 color)
+            {
+                Vector3 n = Vector3.Cross(b - a, c - a).Normalize();
+                var i = (ushort)v.Count;
+                v.Add(new Vertex(a, n, color));
+                v.Add(new Vertex(b, n, color));
+                v.Add(new Vertex(c, n, color));
+                v.Add(new Vertex(d, n, color));
+                idx.Add(i); idx.Add((ushort)(i + 1)); idx.Add((ushort)(i + 2));
+                idx.Add(i); idx.Add((ushort)(i + 2)); idx.Add((ushort)(i + 3));
+            }
+
+            // An axis-aligned box [min,max] with outward faces (skip the ones named in `open` to leave a mouth).
+            void Box(Vector3 lo, Vector3 hi, Vector3 color, string open = "")
+            {
+                Vector3 a000 = new(lo.X, lo.Y, lo.Z), a100 = new(hi.X, lo.Y, lo.Z);
+                Vector3 a110 = new(hi.X, hi.Y, lo.Z), a010 = new(lo.X, hi.Y, lo.Z);
+                Vector3 a001 = new(lo.X, lo.Y, hi.Z), a101 = new(hi.X, lo.Y, hi.Z);
+                Vector3 a111 = new(hi.X, hi.Y, hi.Z), a011 = new(lo.X, hi.Y, hi.Z);
+                if (!open.Contains("front")) Quad(a100, a000, a010, a110, color); // -Z
+                if (!open.Contains("back")) Quad(a001, a101, a111, a011, color);  // +Z
+                if (!open.Contains("right")) Quad(a101, a100, a110, a111, color); // +X
+                if (!open.Contains("left")) Quad(a000, a001, a011, a010, color);  // -X
+                if (!open.Contains("top")) Quad(a011, a111, a110, a010, color);   // +Y
+                if (!open.Contains("bottom")) Quad(a000, a100, a101, a001, color);// -Y
+            }
+
+            var hull = new Vector3(0.42f, 0.46f, 0.55f);   // cold steel blue-grey
+            var deck = new Vector3(0.30f, 0.33f, 0.40f);   // darker plating
+            var tower = new Vector3(0.50f, 0.54f, 0.62f);
+            var engine = new Vector3(0.30f, 1.10f, 1.80f); // bright blue drive wash (HDR > 1 → blooms)
+            var bayGlow = new Vector3(0.40f, 1.30f, 1.40f);// inviting teal hangar light
+
+            // Main hull, bow at -Z. Leave the bow face open for the hangar mouth.
+            Box(new Vector3(-0.5f, -0.30f, -1.0f), new Vector3(0.5f, 0.30f, 1.5f), hull, open: "front");
+
+            // Hangar bay: a recessed tunnel from the bow (z=-1.5) back to a glowing rear wall at z=-1.0.
+            float bx = 0.30f, by = 0.18f, mouth = -1.5f, back = -1.0f;
+            Box(new Vector3(-bx, -by, mouth), new Vector3(bx, by, back), bayGlow, open: "front back"); // walls only
+            Quad(new Vector3(-bx, -by, back), new Vector3(bx, -by, back),
+                 new Vector3(bx, by, back), new Vector3(-bx, by, back), bayGlow); // glowing rear wall
+
+            // Bow shoulders that frame the hangar mouth (fill the hull face around the opening).
+            Quad(new Vector3(-0.5f, -0.30f, -1.0f), new Vector3(-bx, -0.30f, -1.0f),
+                 new Vector3(-bx, 0.30f, -1.0f), new Vector3(-0.5f, 0.30f, -1.0f), deck);
+            Quad(new Vector3(bx, -0.30f, -1.0f), new Vector3(0.5f, -0.30f, -1.0f),
+                 new Vector3(0.5f, 0.30f, -1.0f), new Vector3(bx, 0.30f, -1.0f), deck);
+            Quad(new Vector3(-bx, by, -1.0f), new Vector3(bx, by, -1.0f),
+                 new Vector3(bx, 0.30f, -1.0f), new Vector3(-bx, 0.30f, -1.0f), deck);
+            Quad(new Vector3(-bx, -0.30f, -1.0f), new Vector3(bx, -0.30f, -1.0f),
+                 new Vector3(bx, -by, -1.0f), new Vector3(-bx, -by, -1.0f), deck);
+
+            // Spine deck, command tower, and the engine block at the stern.
+            Box(new Vector3(-0.34f, 0.30f, -0.3f), new Vector3(0.34f, 0.40f, 1.2f), deck);
+            Box(new Vector3(-0.16f, 0.40f, 0.7f), new Vector3(0.16f, 0.70f, 1.15f), tower);
+            Box(new Vector3(-0.42f, -0.24f, 1.5f), new Vector3(0.42f, 0.24f, 1.62f), engine);
+
+            return new Mesh(v.ToArray(), idx.ToArray());
+        }
+
         /// <summary>A unit cube (±0.5), per-face normals and colours. Kept for debris and as a fallback.</summary>
         public static Mesh Cube()
         {
