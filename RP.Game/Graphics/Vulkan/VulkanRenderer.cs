@@ -142,6 +142,9 @@ namespace RP.Game.Graphics.Vulkan
             CreateDepthResources();
             CreateGraphicsPipeline();
             CreateSkyPipeline();
+            CreatePostResources();   // HDR + bloom targets + sampler
+            CreatePostObjects();     // descriptor pool/layouts/sets + bright/blur/composite pipelines
+            UpdatePostDescriptorSets();
             CreateCommandPool();
             CreateCommandBuffers();
             CreateCubeMesh(); // needs the command pool + graphics queue for the staging upload
@@ -878,13 +881,13 @@ namespace RP.Game.Graphics.Vulkan
                 throw new VulkanException("vkBeginCommandBuffer failed", Result.ErrorUnknown);
             }
 
-            // UNDEFINED -> COLOR_ATTACHMENT_OPTIMAL: the image's old contents do not matter (we clear).
-            TransitionImage(cb, _swapchainImages[imageIndex],
+            // --- Scene pass: render sky + hulls into the off-screen HDR target (not the swapchain) ---
+            TransitionImage(cb, _hdrImage,
                 ImageLayout.Undefined, ImageLayout.ColorAttachmentOptimal,
                 0, AccessFlags.ColorAttachmentWriteBit,
                 PipelineStageFlags.TopOfPipeBit, PipelineStageFlags.ColorAttachmentOutputBit);
 
-            // The depth image likewise starts fresh each frame (we clear it), so UNDEFINED is fine.
+            // The depth image starts fresh each frame (we clear it), so UNDEFINED is fine.
             TransitionImage(cb, _depthImage,
                 ImageLayout.Undefined, ImageLayout.DepthAttachmentOptimal,
                 0, AccessFlags.DepthStencilAttachmentWriteBit,
@@ -899,7 +902,7 @@ namespace RP.Game.Graphics.Vulkan
             var colorAttachment = new RenderingAttachmentInfo
             {
                 SType = StructureType.RenderingAttachmentInfo,
-                ImageView = _swapchainImageViews[imageIndex],
+                ImageView = _hdrView,
                 ImageLayout = ImageLayout.ColorAttachmentOptimal,
                 LoadOp = AttachmentLoadOp.Clear,
                 StoreOp = AttachmentStoreOp.Store,
@@ -932,11 +935,8 @@ namespace RP.Game.Graphics.Vulkan
             RecordMesh(cb); // the lit hulls, depth-tested over the backdrop
             _vk.CmdEndRendering(cb);
 
-            // COLOR_ATTACHMENT_OPTIMAL -> PRESENT_SRC: make it safe for the OS to display.
-            TransitionImage(cb, _swapchainImages[imageIndex],
-                ImageLayout.ColorAttachmentOptimal, ImageLayout.PresentSrcKhr,
-                AccessFlags.ColorAttachmentWriteBit, 0,
-                PipelineStageFlags.ColorAttachmentOutputBit, PipelineStageFlags.BottomOfPipeBit);
+            // --- Post: bloom the HDR scene and composite + tonemap into the swapchain image, ready to present ---
+            RecordPostChain(cb, imageIndex);
 
             if (_vk.EndCommandBuffer(cb) != Result.Success)
             {
@@ -999,6 +999,12 @@ namespace RP.Game.Graphics.Vulkan
             CreateImageViews();
             CreateDepthResources();
 
+            // The HDR + bloom targets are swapchain-sized, so rebuild them and re-point the post descriptor
+            // sets at the new image views.
+            DestroyPostResources();
+            CreatePostResources();
+            UpdatePostDescriptorSets();
+
             _log.Debug("Vulkan", $"Swapchain recreated at {_swapchainExtent.Width}x{_swapchainExtent.Height}.");
         }
 
@@ -1047,6 +1053,8 @@ namespace RP.Game.Graphics.Vulkan
             if (_meshIndexMemory.Handle != 0) _vk.FreeMemory(_device, _meshIndexMemory, null);
             DestroyDynamicInstances();
 
+            DestroyPostObjects();
+            DestroyPostResources();
             DestroyGraphicsPipeline();
             DestroySwapchain();
 

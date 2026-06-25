@@ -188,8 +188,9 @@ namespace RP.Game.Graphics.Vulkan
                 throw new VulkanException("vkCreatePipelineLayout failed", Result.ErrorUnknown);
             }
 
-            // Dynamic rendering: tell the pipeline the attachment formats it will render to (no render pass).
-            Format colorFormat = _swapchainFormat;
+            // Dynamic rendering: the scene renders into the offscreen HDR target (not the swapchain), so the
+            // post-process chain can bloom and tonemap it.
+            Format colorFormat = HdrFormat;
             var renderingCreateInfo = new PipelineRenderingCreateInfo
             {
                 SType = StructureType.PipelineRenderingCreateInfo,
@@ -319,7 +320,7 @@ namespace RP.Game.Graphics.Vulkan
                 throw new VulkanException("vkCreatePipelineLayout (sky) failed", Result.ErrorUnknown);
             }
 
-            Format colorFormat = _swapchainFormat;
+            Format colorFormat = HdrFormat; // the sky renders into the HDR scene target too
             var renderingCreateInfo = new PipelineRenderingCreateInfo
             {
                 SType = StructureType.PipelineRenderingCreateInfo,

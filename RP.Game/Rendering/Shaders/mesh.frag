@@ -14,12 +14,6 @@ layout(location = 2) in vec3 vWorldPos;
 
 layout(location = 0) out vec4 outColor;
 
-vec3 acesTonemap(vec3 x)
-{
-    // Narkowicz 2015 ACES approximation.
-    return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
-}
-
 void main()
 {
     vec3 N = normalize(vNormal);
@@ -53,7 +47,6 @@ void main()
 
     vec3 hdr = lit + rimColor + specColor + emit;
 
-    // Tonemap to [0,1] linear; the swapchain is an _SRGB format, so the hardware does the sRGB encode.
-    vec3 mapped = acesTonemap(hdr);
-    outColor = vec4(mapped, 1.0);
+    // Output linear HDR (the target is a float format); the post chain blooms then tonemaps it.
+    outColor = vec4(hdr, 1.0);
 }
