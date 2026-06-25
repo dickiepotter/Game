@@ -41,6 +41,7 @@ namespace RP.Game.Graphics.Vulkan
         private readonly Vector3d[] _instanceWorld = new Vector3d[MaxInstances]; // true-space positions
         private readonly Vector3[] _instanceColor = new Vector3[MaxInstances];
         private readonly float[] _instanceScale = new float[MaxInstances];
+        private readonly Vector4[] _instanceRotation = new Vector4[MaxInstances]; // unit quaternion per instance
         private int _instanceCount;
         private readonly InstanceData[] _renderInstances = new InstanceData[MaxInstances]; // rebased to render space
         private readonly InstanceData[] _cullScratch = new InstanceData[MaxInstances];
@@ -56,7 +57,7 @@ namespace RP.Game.Graphics.Vulkan
 
         /// <summary>
         /// Allocates the per-frame, host-visible instance buffers (one per frame-in-flight) the culled
-        /// survivors are streamed into. The scene's instances are supplied each frame by <see cref="SetInstances"/>.
+        /// survivors are streamed into. The scene's instances are supplied each frame by <c>SetInstances</c>.
         /// </summary>
         private void CreateInstanceBuffers()
         {
@@ -83,6 +84,17 @@ namespace RP.Game.Graphics.Vulkan
         /// ships, debris, projectiles — each frame.
         /// </summary>
         public void SetInstances(ReadOnlySpan<Vector3d> worldPositions, ReadOnlySpan<Vector3> colors, ReadOnlySpan<float> scales)
+            => SetInstances(worldPositions, colors, scales, default);
+
+        /// <summary>
+        /// As the three-argument <c>SetInstances</c>, but each instance also carries an orientation
+        /// (unit quaternion). Where <paramref name="rotations"/>
+        /// is shorter than the instance list (or empty), the remaining instances use the identity rotation —
+        /// so callers that only orient ships can leave debris and tracers un-rotated for free.
+        /// </summary>
+        public void SetInstances(
+            ReadOnlySpan<Vector3d> worldPositions, ReadOnlySpan<Vector3> colors, ReadOnlySpan<float> scales,
+            ReadOnlySpan<Vector4> rotations)
         {
             int count = Math.Min(worldPositions.Length, MaxInstances);
             for (int i = 0; i < count; i++)
@@ -90,6 +102,7 @@ namespace RP.Game.Graphics.Vulkan
                 _instanceWorld[i] = worldPositions[i];
                 _instanceColor[i] = colors[i];
                 _instanceScale[i] = scales[i];
+                _instanceRotation[i] = i < rotations.Length ? rotations[i] : Vector4.UnitW;
             }
 
             _instanceCount = count;
@@ -108,7 +121,7 @@ namespace RP.Game.Graphics.Vulkan
             for (int i = 0; i < _instanceCount; i++)
             {
                 var renderOffset = (Vector3)(_instanceWorld[i] - RenderOrigin);
-                _renderInstances[i] = new InstanceData(renderOffset, _instanceColor[i], _instanceScale[i]);
+                _renderInstances[i] = new InstanceData(renderOffset, _instanceColor[i], _instanceScale[i], _instanceRotation[i]);
                 if (_instanceScale[i] > maxScale) maxScale = _instanceScale[i];
             }
 

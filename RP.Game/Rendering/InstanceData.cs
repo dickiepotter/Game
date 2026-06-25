@@ -28,11 +28,23 @@ namespace RP.Game.Rendering
         /// <summary>Uniform scale applied to the unit mesh before the offset.</summary>
         public readonly float Scale;
 
+        /// <summary>
+        /// Per-instance orientation as a unit quaternion <c>(x, y, z, w)</c>, applied to the mesh before
+        /// scale + offset. The shader rotates each vertex (and its normal) by this, so one hull mesh can
+        /// point in any direction — the difference between a frozen formation and a living dogfight. The
+        /// identity quaternion <c>(0, 0, 0, 1)</c> leaves the mesh in its authored orientation.
+        /// </summary>
+        public readonly Vector4 Rotation;
+
         public InstanceData(Vector3 offset, Vector3 color, float scale = 1f)
+            : this(offset, color, scale, Vector4.UnitW) { }
+
+        public InstanceData(Vector3 offset, Vector3 color, float scale, Vector4 rotation)
         {
             Offset = offset;
             Color = color;
             Scale = scale;
+            Rotation = rotation;
         }
     }
 }

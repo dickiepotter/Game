@@ -17,18 +17,26 @@ layout(location = 2) in vec3 inColor;
 layout(location = 3) in vec3 inOffset;
 layout(location = 4) in vec3 inInstanceColor;
 layout(location = 5) in float inScale;
+layout(location = 6) in vec4 inRotation; // unit quaternion (x,y,z,w)
 
 layout(location = 0) out vec3 vColor;
 layout(location = 1) out vec3 vNormal;
 layout(location = 2) out vec3 vWorldPos;
 
+// Rotate a vector by a unit quaternion: v + 2*cross(q.xyz, cross(q.xyz, v) + q.w*v).
+vec3 qrot(vec4 q, vec3 v)
+{
+    return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+}
+
 void main()
 {
-    // Instances carry no rotation, so object space and world space share an orientation; only scale + offset.
-    vec3 worldPos = inPosition * inScale + inOffset;
+    // Each instance carries its own orientation now: rotate the hull into its heading, then scale + offset.
+    vec3 local = qrot(inRotation, inPosition);
+    vec3 worldPos = local * inScale + inOffset;
     gl_Position = pc.viewProj * vec4(worldPos, 1.0);
 
     vColor = inColor * inInstanceColor;
-    vNormal = normalize(inNormal);
+    vNormal = normalize(qrot(inRotation, inNormal));
     vWorldPos = worldPos;
 }
