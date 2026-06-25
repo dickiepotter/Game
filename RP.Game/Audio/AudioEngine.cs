@@ -27,6 +27,11 @@ namespace RP.Game.Audio
 
         private readonly List<uint> _sources = new List<uint>();
         private readonly List<uint> _buffers = new List<uint>();
+
+        // One-shot voices are recycled: a firefight would otherwise leak a source+buffer per shot and exhaust
+        // OpenAL's source limit. We reuse any voice that has finished playing, and cap the live count.
+        private const int MaxOneShots = 48;
+        private readonly List<(uint Source, uint Buffer)> _oneShots = new List<(uint, uint)>();
         private bool _disposed;
 
         /// <summary>Opens the default audio device and makes a current context.</summary>
@@ -79,25 +84,88 @@ namespace RP.Game.Audio
         }
 
         /// <summary>
-        /// Plays a one-shot 16-bit mono PCM clip at a world position. The engine owns the OpenAL buffer and
-        /// source and frees them on <see cref="Dispose"/>.
+        /// Plays a one-shot 16-bit mono PCM clip at a world position, with optional pitch. Finished voices are
+        /// recycled so a sustained firefight never exhausts OpenAL's sources; once <see cref="MaxOneShots"/>
+        /// are live and none are free, the quietest-to-spare new sound is simply dropped.
         /// </summary>
-        public void PlayAt(short[] pcm, int sampleRate, Vector3 position, float gain = 1f)
+        public void PlayAt(short[] pcm, int sampleRate, Vector3 position, float gain = 1f, float pitch = 1f)
         {
             if (_disposed) return;
+
+            // Reuse a finished voice if there is one; otherwise grow up to the cap.
+            uint source, buffer;
+            int free = FindStoppedOneShot();
+            if (free >= 0)
+            {
+                (source, buffer) = _oneShots[free];
+                _al.SetSourceProperty(source, SourceInteger.Buffer, 0); // detach before re-filling the buffer
+                _al.DeleteBuffer(buffer);
+                buffer = _al.GenBuffer();
+                _oneShots[free] = (source, buffer);
+            }
+            else if (_oneShots.Count < MaxOneShots)
+            {
+                source = _al.GenSource();
+                buffer = _al.GenBuffer();
+                _oneShots.Add((source, buffer));
+            }
+            else
+            {
+                return; // all voices busy — drop this one rather than stall
+            }
+
+            _al.BufferData(buffer, BufferFormat.Mono16, pcm, sampleRate);
+            _al.SetSourceProperty(source, SourceInteger.Buffer, (int)buffer);
+            _al.SetSourceProperty(source, SourceVector3.Position, position.X, position.Y, position.Z);
+            _al.SetSourceProperty(source, SourceFloat.Gain, gain);
+            _al.SetSourceProperty(source, SourceFloat.Pitch, pitch <= 0 ? 1f : pitch);
+            _al.SetSourceProperty(source, SourceBoolean.Looping, false);
+            _al.SourcePlay(source);
+        }
+
+        private int FindStoppedOneShot()
+        {
+            for (int i = 0; i < _oneShots.Count; i++)
+            {
+                _al.GetSourceProperty(_oneShots[i].Source, GetSourceInteger.SourceState, out int state);
+                if (state != (int)SourceState.Playing && state != (int)SourceState.Paused) return i;
+            }
+
+            return -1;
+        }
+
+        /// <summary>
+        /// Starts a looping voice (e.g. the engine drone) and returns its source handle so it can be retuned
+        /// each frame via <see cref="UpdateLoop"/>. When <paramref name="relative"/> is true the source is
+        /// pinned to the listener (always centred), which suits a cockpit hum.
+        /// </summary>
+        public uint StartLoop(short[] pcm, int sampleRate, float gain = 1f, float pitch = 1f, bool relative = true)
+        {
+            if (_disposed) return 0;
 
             uint buffer = _al.GenBuffer();
             _al.BufferData(buffer, BufferFormat.Mono16, pcm, sampleRate);
 
             uint source = _al.GenSource();
             _al.SetSourceProperty(source, SourceInteger.Buffer, (int)buffer);
-            _al.SetSourceProperty(source, SourceVector3.Position, position.X, position.Y, position.Z);
+            _al.SetSourceProperty(source, SourceBoolean.Looping, true);
+            _al.SetSourceProperty(source, SourceBoolean.SourceRelative, relative);
+            _al.SetSourceProperty(source, SourceVector3.Position, 0, 0, 0);
             _al.SetSourceProperty(source, SourceFloat.Gain, gain);
-            _al.SetSourceProperty(source, SourceBoolean.Looping, false);
+            _al.SetSourceProperty(source, SourceFloat.Pitch, pitch <= 0 ? 1f : pitch);
             _al.SourcePlay(source);
 
             _buffers.Add(buffer);
             _sources.Add(source);
+            return source;
+        }
+
+        /// <summary>Retunes a looping voice's gain and pitch (e.g. to track throttle).</summary>
+        public void UpdateLoop(uint source, float gain, float pitch)
+        {
+            if (_disposed || source == 0) return;
+            _al.SetSourceProperty(source, SourceFloat.Gain, gain);
+            _al.SetSourceProperty(source, SourceFloat.Pitch, pitch <= 0 ? 1f : pitch);
         }
 
         /// <summary>
@@ -129,6 +197,12 @@ namespace RP.Game.Audio
         {
             if (_disposed) return;
             _disposed = true;
+
+            foreach ((uint source, uint buffer) in _oneShots)
+            {
+                _al.DeleteSource(source);
+                _al.DeleteBuffer(buffer);
+            }
 
             foreach (uint source in _sources) _al.DeleteSource(source);
             foreach (uint buffer in _buffers) _al.DeleteBuffer(buffer);
