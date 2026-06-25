@@ -146,6 +146,8 @@ namespace RP.Game.Graphics.Vulkan
             CreatePostResources();   // HDR + bloom targets + sampler
             CreatePostObjects();     // descriptor pool/layouts/sets + bright/blur/composite pipelines
             UpdatePostDescriptorSets();
+            CreateHudPipeline();     // 2D line overlay
+            CreateHudBuffers();
             CreateCommandPool();
             CreateCommandBuffers();
             CreateCubeMesh(); // needs the command pool + graphics queue for the staging upload
@@ -817,6 +819,7 @@ namespace RP.Game.Graphics.Vulkan
             // The fence wait above guarantees this frame slot's previous GPU work is done, so it is safe to
             // overwrite this slot's instance buffer with the freshly-culled set.
             CullAndUploadInstances(_currentFrame);
+            UploadHud(_currentFrame);
 
             CommandBuffer cb = _commandBuffers[_currentFrame];
             _vk.ResetCommandBuffer(cb, 0);
@@ -1069,6 +1072,7 @@ namespace RP.Game.Graphics.Vulkan
             if (_meshIndexMemory.Handle != 0) _vk.FreeMemory(_device, _meshIndexMemory, null);
             DestroyDynamicInstances();
 
+            DestroyHud();
             DestroyPostObjects();
             DestroyPostResources();
             DestroyGraphicsPipeline();

@@ -386,11 +386,40 @@ namespace RP.Game.Graphics.Vulkan
                 ToShaderRead(cb, _bloomImageA);
             }
 
-            // Composite scene + bloom -> swapchain.
+            // Composite scene + bloom -> swapchain, then draw the HUD lines on top, in one rendering.
             TransitionImage(cb, _swapchainImages[imageIndex], ImageLayout.Undefined, ImageLayout.ColorAttachmentOptimal,
                 0, AccessFlags.ColorAttachmentWriteBit,
                 PipelineStageFlags.TopOfPipeBit, PipelineStageFlags.ColorAttachmentOutputBit);
-            FullscreenPass(cb, _compositePipeline, _compositeLayout, _compositeSet, _swapchainImageViews[imageIndex], _swapchainExtent, null, 0);
+
+            var colorAttachment = new RenderingAttachmentInfo
+            {
+                SType = StructureType.RenderingAttachmentInfo,
+                ImageView = _swapchainImageViews[imageIndex],
+                ImageLayout = ImageLayout.ColorAttachmentOptimal,
+                LoadOp = AttachmentLoadOp.DontCare, // the composite triangle covers every pixel
+                StoreOp = AttachmentStoreOp.Store,
+            };
+            var renderingInfo = new RenderingInfo
+            {
+                SType = StructureType.RenderingInfo,
+                RenderArea = new Rect2D(new Offset2D(0, 0), _swapchainExtent),
+                LayerCount = 1, ColorAttachmentCount = 1, PColorAttachments = &colorAttachment,
+            };
+            _vk.CmdBeginRendering(cb, in renderingInfo);
+
+            var viewport = new Viewport { X = 0, Y = 0, Width = _swapchainExtent.Width, Height = _swapchainExtent.Height, MinDepth = 0, MaxDepth = 1 };
+            _vk.CmdSetViewport(cb, 0, 1, in viewport);
+            var scissor = new Rect2D(new Offset2D(0, 0), _swapchainExtent);
+            _vk.CmdSetScissor(cb, 0, 1, in scissor);
+
+            _vk.CmdBindPipeline(cb, PipelineBindPoint.Graphics, _compositePipeline);
+            _vk.CmdBindDescriptorSets(cb, PipelineBindPoint.Graphics, _compositeLayout, 0, 1, in _compositeSet, 0, null);
+            _vk.CmdDraw(cb, 3, 1, 0, 0);
+
+            RecordHudDraw(cb); // HUD lines over the composited image
+
+            _vk.CmdEndRendering(cb);
+
             TransitionImage(cb, _swapchainImages[imageIndex], ImageLayout.ColorAttachmentOptimal, ImageLayout.PresentSrcKhr,
                 AccessFlags.ColorAttachmentWriteBit, 0,
                 PipelineStageFlags.ColorAttachmentOutputBit, PipelineStageFlags.BottomOfPipeBit);
