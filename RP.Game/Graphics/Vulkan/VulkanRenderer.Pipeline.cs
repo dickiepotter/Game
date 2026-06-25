@@ -494,6 +494,15 @@ namespace RP.Game.Graphics.Vulkan
                 _vk.CmdBindIndexBuffer(cb, _capitalIndexBuffer, 0, IndexType.Uint16);
                 _vk.CmdDrawIndexed(cb, _capitalIndexCount, _capitalVisible, 0, 0, 0);
             }
+
+            // Ship hulls: a third mesh (a loaded model, or the Dart by default) and instance batch.
+            if (_shipVisible > 0)
+            {
+                var shipBuffers = stackalloc Buffer[2] { _shipVertexBuffer, _shipInstanceBuffers[_currentFrame] };
+                _vk.CmdBindVertexBuffers(cb, 0, 2, shipBuffers, offsets);
+                _vk.CmdBindIndexBuffer(cb, _shipIndexBuffer, 0, IndexType.Uint16);
+                _vk.CmdDrawIndexed(cb, _shipIndexCount, _shipVisible, 0, 0, 0);
+            }
         }
 
         private void DestroyGraphicsPipeline()

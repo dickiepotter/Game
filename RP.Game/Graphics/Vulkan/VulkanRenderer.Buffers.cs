@@ -51,6 +51,26 @@ namespace RP.Game.Graphics.Vulkan
         private readonly nint[] _capitalInstanceMapped = new nint[MaxFramesInFlight];
         private uint _capitalVisible;
 
+        // Ship hulls: their own mesh + instanced batch, so the fighters can be a detailed loaded model while
+        // debris/tracers/dust stay cheap points on the default mesh. Defaults to the Dart so ships still draw
+        // if no model is supplied; SetShipModel swaps in a loaded hull.
+        private const int MaxShips = 512;
+        private Buffer _shipVertexBuffer;
+        private DeviceMemory _shipVertexMemory;
+        private Buffer _shipIndexBuffer;
+        private DeviceMemory _shipIndexMemory;
+        private uint _shipIndexCount;
+        private readonly Vector3d[] _shipWorld = new Vector3d[MaxShips];
+        private readonly Vector3[] _shipColor = new Vector3[MaxShips];
+        private readonly float[] _shipScale = new float[MaxShips];
+        private readonly Vector4[] _shipRotation = new Vector4[MaxShips];
+        private int _shipCount;
+        private readonly InstanceData[] _shipRender = new InstanceData[MaxShips];
+        private readonly Buffer[] _shipInstanceBuffers = new Buffer[MaxFramesInFlight];
+        private readonly DeviceMemory[] _shipInstanceMemories = new DeviceMemory[MaxFramesInFlight];
+        private readonly nint[] _shipInstanceMapped = new nint[MaxFramesInFlight];
+        private uint _shipVisible;
+
         // Phase 2 instancing + culling, now fed from outside via SetInstances. The scene's instances live on
         // the CPU as true (double) world positions + colour + scale; each frame we rebase them to render
         // space, cull to the camera frustum into _cullScratch, and copy the survivors into that frame's own
@@ -262,6 +282,105 @@ namespace RP.Game.Graphics.Vulkan
             {
                 System.Buffer.MemoryCopy(src, (void*)_capitalInstanceMapped[frameIndex], capacity, bytes);
             }
+        }
+
+        /// <summary>Creates the ship batch: a default (Dart) hull mesh plus its per-frame instance buffers.</summary>
+        private void CreateShipBatch()
+        {
+            UploadShipMesh(Primitives.Dart());
+
+            ulong capacity = (ulong)(MaxShips * sizeof(InstanceData));
+            for (int i = 0; i < MaxFramesInFlight; i++)
+            {
+                (_shipInstanceBuffers[i], _shipInstanceMemories[i]) = CreateBuffer(
+                    capacity,
+                    BufferUsageFlags.VertexBufferBit,
+                    MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit);
+                void* mapped;
+                _vk.MapMemory(_device, _shipInstanceMemories[i], 0, capacity, 0, &mapped);
+                _shipInstanceMapped[i] = (nint)mapped;
+            }
+        }
+
+        private void UploadShipMesh(Primitives.Mesh mesh)
+        {
+            if (_shipVertexBuffer.Handle != 0) _vk.DestroyBuffer(_device, _shipVertexBuffer, null);
+            if (_shipVertexMemory.Handle != 0) _vk.FreeMemory(_device, _shipVertexMemory, null);
+            if (_shipIndexBuffer.Handle != 0) _vk.DestroyBuffer(_device, _shipIndexBuffer, null);
+            if (_shipIndexMemory.Handle != 0) _vk.FreeMemory(_device, _shipIndexMemory, null);
+
+            _shipIndexCount = (uint)mesh.Indices.Length;
+            (_shipVertexBuffer, _shipVertexMemory) =
+                CreateDeviceLocalBuffer<Vertex>(mesh.Vertices, BufferUsageFlags.VertexBufferBit);
+            (_shipIndexBuffer, _shipIndexMemory) =
+                CreateDeviceLocalBuffer<ushort>(mesh.Indices, BufferUsageFlags.IndexBufferBit);
+        }
+
+        /// <summary>Replaces the hull mesh the ship batch draws (e.g. a model loaded from disk). Safe to call
+        /// after start-up; it waits for the GPU to go idle before swapping the buffers.</summary>
+        public void SetShipModel(Vertex[] vertices, ushort[] indices)
+        {
+            if (vertices is null || indices is null || vertices.Length == 0 || indices.Length == 0) return;
+            _vk.DeviceWaitIdle(_device);
+            UploadShipMesh(new Primitives.Mesh(vertices, indices));
+            _log.Info("Vulkan", $"Ship model set: {vertices.Length} vertices, {indices.Length / 3} triangles.");
+        }
+
+        /// <summary>Supplies the ship hulls drawn this frame (true positions, tint, scale, orientation).</summary>
+        public void SetShipInstances(
+            ReadOnlySpan<Vector3d> worldPositions, ReadOnlySpan<Vector3> colors, ReadOnlySpan<float> scales,
+            ReadOnlySpan<Vector4> rotations)
+        {
+            int count = Math.Min(worldPositions.Length, MaxShips);
+            for (int i = 0; i < count; i++)
+            {
+                _shipWorld[i] = worldPositions[i];
+                _shipColor[i] = colors[i];
+                _shipScale[i] = scales[i];
+                _shipRotation[i] = i < rotations.Length ? rotations[i] : Vector4.UnitW;
+            }
+
+            _shipCount = count;
+        }
+
+        private void UploadShips(int frameIndex)
+        {
+            for (int i = 0; i < _shipCount; i++)
+            {
+                var renderOffset = (Vector3)(_shipWorld[i] - RenderOrigin);
+                _shipRender[i] = new InstanceData(renderOffset, _shipColor[i], _shipScale[i], _shipRotation[i]);
+            }
+
+            _shipVisible = (uint)_shipCount;
+            if (_shipCount == 0) return;
+
+            ulong bytes = (ulong)(_shipCount * sizeof(InstanceData));
+            ulong capacity = (ulong)(MaxShips * sizeof(InstanceData));
+            fixed (InstanceData* src = _shipRender)
+            {
+                System.Buffer.MemoryCopy(src, (void*)_shipInstanceMapped[frameIndex], capacity, bytes);
+            }
+        }
+
+        private void DestroyShipResources()
+        {
+            for (int i = 0; i < MaxFramesInFlight; i++)
+            {
+                if (_shipInstanceMemories[i].Handle != 0)
+                {
+                    _vk.UnmapMemory(_device, _shipInstanceMemories[i]);
+                    _vk.FreeMemory(_device, _shipInstanceMemories[i], null);
+                }
+                if (_shipInstanceBuffers[i].Handle != 0)
+                {
+                    _vk.DestroyBuffer(_device, _shipInstanceBuffers[i], null);
+                }
+            }
+
+            if (_shipVertexBuffer.Handle != 0) _vk.DestroyBuffer(_device, _shipVertexBuffer, null);
+            if (_shipVertexMemory.Handle != 0) _vk.FreeMemory(_device, _shipVertexMemory, null);
+            if (_shipIndexBuffer.Handle != 0) _vk.DestroyBuffer(_device, _shipIndexBuffer, null);
+            if (_shipIndexMemory.Handle != 0) _vk.FreeMemory(_device, _shipIndexMemory, null);
         }
 
         private void DestroyCapitalResources()

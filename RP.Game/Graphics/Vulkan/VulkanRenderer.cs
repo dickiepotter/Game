@@ -153,6 +153,7 @@ namespace RP.Game.Graphics.Vulkan
             CreateCubeMesh(); // needs the command pool + graphics queue for the staging upload
             CreateInstanceBuffers();
             CreateCapitalMesh(); // capital hull + its own per-frame instance buffers
+            CreateShipBatch();   // ship hull batch (Dart by default; SetShipModel swaps in a loaded mesh)
             CreateSyncObjects();
 
             _log.Info("Vulkan", $"Renderer up: {_swapchainImages.Length} swapchain images at " +
@@ -821,6 +822,7 @@ namespace RP.Game.Graphics.Vulkan
             // overwrite this slot's instance buffer with the freshly-culled set.
             CullAndUploadInstances(_currentFrame);
             UploadCapitals(_currentFrame);
+            UploadShips(_currentFrame);
             UploadHud(_currentFrame);
 
             CommandBuffer cb = _commandBuffers[_currentFrame];
@@ -1074,6 +1076,7 @@ namespace RP.Game.Graphics.Vulkan
             if (_meshIndexMemory.Handle != 0) _vk.FreeMemory(_device, _meshIndexMemory, null);
             DestroyDynamicInstances();
             DestroyCapitalResources();
+            DestroyShipResources();
 
             DestroyHud();
             DestroyPostObjects();
