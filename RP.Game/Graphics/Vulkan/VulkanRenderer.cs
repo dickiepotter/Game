@@ -141,6 +141,7 @@ namespace RP.Game.Graphics.Vulkan
             CreateImageViews();
             CreateDepthResources();
             CreateGraphicsPipeline();
+            CreateSkyPipeline();
             CreateCommandPool();
             CreateCommandBuffers();
             CreateCubeMesh(); // needs the command pool + graphics queue for the staging upload
@@ -927,7 +928,8 @@ namespace RP.Game.Graphics.Vulkan
             };
 
             _vk.CmdBeginRendering(cb, in renderingInfo);
-            RecordMesh(cb); // Phase 1: draw the lit cube through the graphics pipeline.
+            RecordSky(cb);  // procedural starfield/nebula backdrop, behind everything
+            RecordMesh(cb); // the lit hulls, depth-tested over the backdrop
             _vk.CmdEndRendering(cb);
 
             // COLOR_ATTACHMENT_OPTIMAL -> PRESENT_SRC: make it safe for the OS to display.

@@ -1,11 +1,11 @@
 #version 450
 
-// Instanced, lit mesh vertex shader. Per-vertex inputs (binding 0) describe the cube once; per-instance
-// inputs (binding 1) place and tint each of the thousands of copies. The push constant carries the
-// camera's view-projection and a shared spin applied to every instance.
+// Instanced, lit mesh vertex shader. Per-vertex inputs (binding 0) describe the hull once; per-instance
+// inputs (binding 1) place, scale and tint each copy. The push constant carries the camera's view-projection,
+// a shared spin, and the camera position (for per-pixel lighting in the fragment stage).
 layout(push_constant) uniform Push {
-    mat4 viewProj; // camera world -> clip (Vulkan-corrected)
-    mat4 spin;     // shared rotation applied to every instance
+    mat4 viewProj;  // camera world -> clip (Vulkan-corrected)
+    vec4 camPos;    // xyz = camera position in render space
 } pc;
 
 // Per-vertex (binding 0)
@@ -18,19 +18,17 @@ layout(location = 3) in vec3 inOffset;
 layout(location = 4) in vec3 inInstanceColor;
 layout(location = 5) in float inScale;
 
-layout(location = 0) out vec3 fragColor;
+layout(location = 0) out vec3 vColor;
+layout(location = 1) out vec3 vNormal;
+layout(location = 2) out vec3 vWorldPos;
 
 void main()
 {
-    // Spin the cube about its own centre, scale it to the instance's size, then translate into place.
-    vec3 spun = (pc.spin * vec4(inPosition, 1.0)).xyz;
-    vec3 worldPos = spun * inScale + inOffset;
+    // Instances carry no rotation, so object space and world space share an orientation; only scale + offset.
+    vec3 worldPos = inPosition * inScale + inOffset;
     gl_Position = pc.viewProj * vec4(worldPos, 1.0);
 
-    vec3 worldNormal = normalize(mat3(pc.spin) * inNormal);
-    vec3 lightDir = normalize(vec3(0.4, 1.0, 0.6));
-    float diffuse = max(dot(worldNormal, lightDir), 0.0);
-    float ambient = 0.25;
-
-    fragColor = inColor * inInstanceColor * (ambient + diffuse);
+    vColor = inColor * inInstanceColor;
+    vNormal = normalize(inNormal);
+    vWorldPos = worldPos;
 }

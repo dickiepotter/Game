@@ -21,6 +21,10 @@ namespace RP.Game.Graphics.Vulkan
         private Pipeline _graphicsPipeline;
         private PipelineLayout _pipelineLayout;
 
+        // The full-screen procedural starfield/nebula backdrop, drawn before the scene (no depth write).
+        private Pipeline _skyPipeline;
+        private PipelineLayout _skyPipelineLayout;
+
         /// <summary>
         /// Builds the triangle pipeline. Two choices keep it resize-proof and render-pass-free:
         /// <list type="bullet">
@@ -164,13 +168,13 @@ namespace RP.Game.Graphics.Vulkan
                 PDynamicStates = dynamicStates,
             };
 
-            // One push-constant range: 128 bytes (two mat4 — MVP and model) visible to the vertex stage.
-            // Push constants are the cheapest way to feed a few per-draw values, no descriptor sets needed.
+            // One push-constant range: 80 bytes (a mat4 viewProj + a vec4 camera position), within the common
+            // 128-byte limit, visible to both stages so the fragment shader can light per pixel.
             var pushRange = new PushConstantRange
             {
-                StageFlags = ShaderStageFlags.VertexBit,
+                StageFlags = ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit,
                 Offset = 0,
-                Size = 2 * 16 * sizeof(float),
+                Size = (16 + 4) * sizeof(float),
             };
             var layoutInfo = new PipelineLayoutCreateInfo
             {
@@ -232,6 +236,161 @@ namespace RP.Game.Graphics.Vulkan
             SilkMarshal.Free((nint)entryPoint);
 
             if (result != Result.Success) throw new VulkanException("vkCreateGraphicsPipelines failed", result);
+        }
+
+        /// <summary>
+        /// Builds the backdrop pipeline: a full-screen triangle (no vertex input) running the procedural
+        /// starfield/nebula shaders, with depth test/write off so it sits behind everything. Its push constant
+        /// carries the camera basis so the shader can cast a view ray per pixel.
+        /// </summary>
+        private void CreateSkyPipeline()
+        {
+            ShaderModule vertModule = CreateShaderModule("sky.vert.spv");
+            ShaderModule fragModule = CreateShaderModule("sky.frag.spv");
+            byte* entryPoint = (byte*)SilkMarshal.StringToPtr("main");
+
+            var stages = stackalloc PipelineShaderStageCreateInfo[2];
+            stages[0] = new PipelineShaderStageCreateInfo
+            {
+                SType = StructureType.PipelineShaderStageCreateInfo,
+                Stage = ShaderStageFlags.VertexBit, Module = vertModule, PName = entryPoint,
+            };
+            stages[1] = new PipelineShaderStageCreateInfo
+            {
+                SType = StructureType.PipelineShaderStageCreateInfo,
+                Stage = ShaderStageFlags.FragmentBit, Module = fragModule, PName = entryPoint,
+            };
+
+            // No vertex input: the vertex shader synthesises the triangle from gl_VertexIndex.
+            var vertexInput = new PipelineVertexInputStateCreateInfo
+            {
+                SType = StructureType.PipelineVertexInputStateCreateInfo,
+            };
+            var inputAssembly = new PipelineInputAssemblyStateCreateInfo
+            {
+                SType = StructureType.PipelineInputAssemblyStateCreateInfo,
+                Topology = PrimitiveTopology.TriangleList,
+            };
+            var viewportState = new PipelineViewportStateCreateInfo
+            {
+                SType = StructureType.PipelineViewportStateCreateInfo, ViewportCount = 1, ScissorCount = 1,
+            };
+            var rasterizer = new PipelineRasterizationStateCreateInfo
+            {
+                SType = StructureType.PipelineRasterizationStateCreateInfo,
+                PolygonMode = PolygonMode.Fill, CullMode = CullModeFlags.None,
+                FrontFace = FrontFace.CounterClockwise, LineWidth = 1.0f,
+            };
+            var multisampling = new PipelineMultisampleStateCreateInfo
+            {
+                SType = StructureType.PipelineMultisampleStateCreateInfo,
+                RasterizationSamples = SampleCountFlags.Count1Bit,
+            };
+            var colorBlendAttachment = new PipelineColorBlendAttachmentState
+            {
+                ColorWriteMask = ColorComponentFlags.RBit | ColorComponentFlags.GBit |
+                                 ColorComponentFlags.BBit | ColorComponentFlags.ABit,
+                BlendEnable = false,
+            };
+            var colorBlending = new PipelineColorBlendStateCreateInfo
+            {
+                SType = StructureType.PipelineColorBlendStateCreateInfo,
+                AttachmentCount = 1, PAttachments = &colorBlendAttachment,
+            };
+            var dynamicStates = stackalloc DynamicState[2] { DynamicState.Viewport, DynamicState.Scissor };
+            var dynamicState = new PipelineDynamicStateCreateInfo
+            {
+                SType = StructureType.PipelineDynamicStateCreateInfo,
+                DynamicStateCount = 2, PDynamicStates = dynamicStates,
+            };
+
+            // Push constant: three vec4 (camera right/up/forward + aspect & tan-half-fov), fragment stage.
+            var pushRange = new PushConstantRange
+            {
+                StageFlags = ShaderStageFlags.FragmentBit, Offset = 0, Size = 3 * 4 * sizeof(float),
+            };
+            var layoutInfo = new PipelineLayoutCreateInfo
+            {
+                SType = StructureType.PipelineLayoutCreateInfo,
+                PushConstantRangeCount = 1, PPushConstantRanges = &pushRange,
+            };
+            if (_vk.CreatePipelineLayout(_device, in layoutInfo, null, out _skyPipelineLayout) != Result.Success)
+            {
+                throw new VulkanException("vkCreatePipelineLayout (sky) failed", Result.ErrorUnknown);
+            }
+
+            Format colorFormat = _swapchainFormat;
+            var renderingCreateInfo = new PipelineRenderingCreateInfo
+            {
+                SType = StructureType.PipelineRenderingCreateInfo,
+                ColorAttachmentCount = 1, PColorAttachmentFormats = &colorFormat,
+                DepthAttachmentFormat = _depthFormat,
+            };
+
+            // Depth test/write OFF — the backdrop never occludes the scene and is never occluded by it; the
+            // scene draws afterward with depth and paints over it.
+            var depthStencil = new PipelineDepthStencilStateCreateInfo
+            {
+                SType = StructureType.PipelineDepthStencilStateCreateInfo,
+                DepthTestEnable = false, DepthWriteEnable = false,
+                DepthCompareOp = CompareOp.Always, DepthBoundsTestEnable = false, StencilTestEnable = false,
+            };
+
+            var pipelineInfo = new GraphicsPipelineCreateInfo
+            {
+                SType = StructureType.GraphicsPipelineCreateInfo,
+                PNext = &renderingCreateInfo,
+                StageCount = 2, PStages = stages,
+                PVertexInputState = &vertexInput,
+                PInputAssemblyState = &inputAssembly,
+                PViewportState = &viewportState,
+                PRasterizationState = &rasterizer,
+                PMultisampleState = &multisampling,
+                PDepthStencilState = &depthStencil,
+                PColorBlendState = &colorBlending,
+                PDynamicState = &dynamicState,
+                Layout = _skyPipelineLayout,
+            };
+
+            Result result = _vk.CreateGraphicsPipelines(_device, default, 1, in pipelineInfo, null, out _skyPipeline);
+            _vk.DestroyShaderModule(_device, vertModule, null);
+            _vk.DestroyShaderModule(_device, fragModule, null);
+            SilkMarshal.Free((nint)entryPoint);
+            if (result != Result.Success) throw new VulkanException("vkCreateGraphicsPipelines (sky) failed", result);
+        }
+
+        /// <summary>Draws the full-screen backdrop, feeding the camera basis so the shader's view ray matches
+        /// where the camera looks (so stars/nebula parallax as you turn).</summary>
+        private void RecordSky(CommandBuffer cb)
+        {
+            var viewport = new Viewport
+            {
+                X = 0, Y = 0, Width = _swapchainExtent.Width, Height = _swapchainExtent.Height,
+                MinDepth = 0, MaxDepth = 1,
+            };
+            _vk.CmdSetViewport(cb, 0, 1, in viewport);
+            var scissor = new Rect2D(new Offset2D(0, 0), _swapchainExtent);
+            _vk.CmdSetScissor(cb, 0, 1, in scissor);
+
+            _vk.CmdBindPipeline(cb, PipelineBindPoint.Graphics, _skyPipeline);
+
+            // Camera basis from the look-at vectors (narrowed to float for the shader).
+            var camPos = (Vector3)Camera.Position;
+            var camTarget = (Vector3)Camera.Target;
+            var camUp = (Vector3)Camera.Up;
+            Vector3 forward = (camTarget - camPos).Normalize();
+            Vector3 right = Vector3.Cross(forward, camUp).Normalize();
+            Vector3 up = Vector3.Cross(right, forward).Normalize();
+            float aspect = _swapchainExtent.Height == 0 ? 1.0f : (float)_swapchainExtent.Width / _swapchainExtent.Height;
+            float tanHalfFov = (float)System.Math.Tan(Camera.FieldOfView.Rad * 0.5);
+
+            float* push = stackalloc float[12];
+            push[0] = right.X; push[1] = right.Y; push[2] = right.Z; push[3] = aspect;
+            push[4] = up.X; push[5] = up.Y; push[6] = up.Z; push[7] = tanHalfFov;
+            push[8] = forward.X; push[9] = forward.Y; push[10] = forward.Z; push[11] = 0f;
+            _vk.CmdPushConstants(cb, _skyPipelineLayout, ShaderStageFlags.FragmentBit, 0, 12 * sizeof(float), push);
+
+            _vk.CmdDraw(cb, 3, 1, 0, 0); // one full-screen triangle
         }
 
         /// <summary>
@@ -298,15 +457,18 @@ namespace RP.Game.Graphics.Vulkan
 
             _vk.CmdBindPipeline(cb, PipelineBindPoint.Graphics, _graphicsPipeline);
 
-            // Push the camera's view-projection and the shared spin (both flattened to GLSL column-major).
+            // Push the camera's view-projection (column-major) and position (for per-pixel rim/spec lighting).
             Matrix viewProj = Camera.ViewProjection;
-            Matrix spin = ModelTransform;
 
-            float* push = stackalloc float[32];
-            var span = new Span<float>(push, 32);
+            float* push = stackalloc float[20];
+            var span = new Span<float>(push, 20);
             Camera.ToColumnMajorFloats(viewProj, span.Slice(0, 16));
-            Camera.ToColumnMajorFloats(spin, span.Slice(16, 16));
-            _vk.CmdPushConstants(cb, _pipelineLayout, ShaderStageFlags.VertexBit, 0, 32 * sizeof(float), push);
+            span[16] = (float)Camera.Position.X;
+            span[17] = (float)Camera.Position.Y;
+            span[18] = (float)Camera.Position.Z;
+            span[19] = 0f;
+            _vk.CmdPushConstants(cb, _pipelineLayout, ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit,
+                0, 20 * sizeof(float), push);
 
             // Bind binding 0 (cube vertices) and binding 1 (this frame's culled per-instance data).
             var vertexBuffers = stackalloc Buffer[2] { _meshVertexBuffer, _dynamicInstanceBuffers[_currentFrame] };
@@ -320,6 +482,8 @@ namespace RP.Game.Graphics.Vulkan
 
         private void DestroyGraphicsPipeline()
         {
+            if (_skyPipeline.Handle != 0) _vk.DestroyPipeline(_device, _skyPipeline, null);
+            if (_skyPipelineLayout.Handle != 0) _vk.DestroyPipelineLayout(_device, _skyPipelineLayout, null);
             if (_graphicsPipeline.Handle != 0) _vk.DestroyPipeline(_device, _graphicsPipeline, null);
             if (_pipelineLayout.Handle != 0) _vk.DestroyPipelineLayout(_device, _pipelineLayout, null);
         }
