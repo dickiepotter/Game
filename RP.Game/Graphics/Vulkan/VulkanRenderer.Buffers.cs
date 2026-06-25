@@ -170,9 +170,10 @@ namespace RP.Game.Graphics.Vulkan
         }
 
         /// <summary>Creates an image and binds a fresh device-local memory block to it. Used for the depth
-        /// buffer (and, later, textures).</summary>
+        /// buffer, the HDR/bloom targets, and the MSAA attachments.</summary>
         private (Image Image, DeviceMemory Memory) CreateImage(
-            uint width, uint height, Format format, ImageUsageFlags usage)
+            uint width, uint height, Format format, ImageUsageFlags usage,
+            SampleCountFlags samples = SampleCountFlags.Count1Bit)
         {
             var imageInfo = new ImageCreateInfo
             {
@@ -185,7 +186,7 @@ namespace RP.Game.Graphics.Vulkan
                 Tiling = ImageTiling.Optimal,
                 InitialLayout = ImageLayout.Undefined,
                 Usage = usage,
-                Samples = SampleCountFlags.Count1Bit,
+                Samples = samples,
                 SharingMode = SharingMode.Exclusive,
             };
 

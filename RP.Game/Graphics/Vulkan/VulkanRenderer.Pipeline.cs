@@ -141,7 +141,7 @@ namespace RP.Game.Graphics.Vulkan
             {
                 SType = StructureType.PipelineMultisampleStateCreateInfo,
                 SampleShadingEnable = false,
-                RasterizationSamples = SampleCountFlags.Count1Bit,
+                RasterizationSamples = _msaaSamples, // scene renders into the multisampled HDR target
             };
 
             // Opaque: write all channels, no blending.
@@ -285,7 +285,7 @@ namespace RP.Game.Graphics.Vulkan
             var multisampling = new PipelineMultisampleStateCreateInfo
             {
                 SType = StructureType.PipelineMultisampleStateCreateInfo,
-                RasterizationSamples = SampleCountFlags.Count1Bit,
+                RasterizationSamples = _msaaSamples, // matches the multisampled scene target
             };
             var colorBlendAttachment = new PipelineColorBlendAttachmentState
             {

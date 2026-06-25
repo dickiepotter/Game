@@ -137,6 +137,7 @@ namespace RP.Game.Graphics.Vulkan
             CreateSurface();
             PickPhysicalDevice();
             CreateLogicalDevice();
+            DetermineSampleCount(); // MSAA level, needed by depth + scene pipelines below
             CreateSwapchain();
             CreateImageViews();
             CreateDepthResources();
@@ -881,7 +882,19 @@ namespace RP.Game.Graphics.Vulkan
                 throw new VulkanException("vkBeginCommandBuffer failed", Result.ErrorUnknown);
             }
 
-            // --- Scene pass: render sky + hulls into the off-screen HDR target (not the swapchain) ---
+            // --- Scene pass: render sky + hulls into the off-screen (multisampled) HDR target ---
+            bool msaa = _msaaSamples != SampleCountFlags.Count1Bit;
+
+            // The multisampled colour target we draw into (when MSAA is on).
+            if (msaa)
+            {
+                TransitionImage(cb, _hdrMsaaImage,
+                    ImageLayout.Undefined, ImageLayout.ColorAttachmentOptimal,
+                    0, AccessFlags.ColorAttachmentWriteBit,
+                    PipelineStageFlags.TopOfPipeBit, PipelineStageFlags.ColorAttachmentOutputBit);
+            }
+
+            // The single-sample HDR image: drawn directly (no MSAA) or written by the resolve (MSAA).
             TransitionImage(cb, _hdrImage,
                 ImageLayout.Undefined, ImageLayout.ColorAttachmentOptimal,
                 0, AccessFlags.ColorAttachmentWriteBit,
@@ -902,11 +915,14 @@ namespace RP.Game.Graphics.Vulkan
             var colorAttachment = new RenderingAttachmentInfo
             {
                 SType = StructureType.RenderingAttachmentInfo,
-                ImageView = _hdrView,
+                ImageView = msaa ? _hdrMsaaView : _hdrView,
                 ImageLayout = ImageLayout.ColorAttachmentOptimal,
                 LoadOp = AttachmentLoadOp.Clear,
                 StoreOp = AttachmentStoreOp.Store,
                 ClearValue = clear,
+                ResolveMode = msaa ? ResolveModeFlags.AverageBit : ResolveModeFlags.None,
+                ResolveImageView = msaa ? _hdrView : default,
+                ResolveImageLayout = msaa ? ImageLayout.ColorAttachmentOptimal : ImageLayout.Undefined,
             };
 
             // Depth attachment: clear to the far value (1.0) each frame; we don't need to keep it after.

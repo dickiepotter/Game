@@ -15,7 +15,15 @@ namespace RP.Game.Graphics.Vulkan
     {
         internal const Format HdrFormat = Format.R16G16B16A16Sfloat;
 
-        // Off-screen targets: the HDR scene, and two half-res bloom buffers the blur ping-pongs between.
+        // Multisampling: the scene renders to a multisampled HDR colour + depth, then resolves to the single-
+        // sample HDR target the post chain samples. Set once from the device's limits.
+        private SampleCountFlags _msaaSamples = SampleCountFlags.Count1Bit;
+        private Image _hdrMsaaImage;
+        private DeviceMemory _hdrMsaaMemory;
+        private ImageView _hdrMsaaView;
+
+        // Off-screen targets: the HDR scene (resolve target), and two half-res bloom buffers the blur
+        // ping-pongs between.
         private Image _hdrImage;
         private DeviceMemory _hdrMemory;
         private ImageView _hdrView;
@@ -40,13 +48,37 @@ namespace RP.Game.Graphics.Vulkan
 
         private const int BlurIterations = 2;
 
-        /// <summary>Creates the HDR + bloom images and the sampler (swapchain-sized; bloom at half res).</summary>
+        /// <summary>Picks the largest sample count the device supports for both colour and depth, capped at 4x
+        /// (plenty for clean edges without the bandwidth of 8x). Call once after the device is up.</summary>
+        private void DetermineSampleCount()
+        {
+            _vk.GetPhysicalDeviceProperties(_physicalDevice, out PhysicalDeviceProperties props);
+            SampleCountFlags supported = props.Limits.FramebufferColorSampleCounts & props.Limits.FramebufferDepthSampleCounts;
+
+            if (supported.HasFlag(SampleCountFlags.Count4Bit)) _msaaSamples = SampleCountFlags.Count4Bit;
+            else if (supported.HasFlag(SampleCountFlags.Count2Bit)) _msaaSamples = SampleCountFlags.Count2Bit;
+            else _msaaSamples = SampleCountFlags.Count1Bit;
+
+            _log.Info("Vulkan", $"MSAA: {(int)_msaaSamples}x.");
+        }
+
+        /// <summary>Creates the HDR + bloom images, the multisampled scene target, and the sampler
+        /// (swapchain-sized; bloom at half res).</summary>
         private void CreatePostResources()
         {
             (_hdrImage, _hdrMemory) = CreateImage(
                 _swapchainExtent.Width, _swapchainExtent.Height, HdrFormat,
                 ImageUsageFlags.ColorAttachmentBit | ImageUsageFlags.SampledBit);
             _hdrView = CreateColorView(_hdrImage, HdrFormat);
+
+            // Multisampled HDR colour the scene draws into; resolved into _hdrImage at the end of the pass.
+            if (_msaaSamples != SampleCountFlags.Count1Bit)
+            {
+                (_hdrMsaaImage, _hdrMsaaMemory) = CreateImage(
+                    _swapchainExtent.Width, _swapchainExtent.Height, HdrFormat,
+                    ImageUsageFlags.ColorAttachmentBit, _msaaSamples);
+                _hdrMsaaView = CreateColorView(_hdrMsaaImage, HdrFormat);
+            }
 
             _bloomExtent = new Extent2D(
                 System.Math.Max(1, _swapchainExtent.Width / 2),
@@ -412,6 +444,11 @@ namespace RP.Game.Graphics.Vulkan
 
         private void DestroyPostResources()
         {
+            if (_hdrMsaaView.Handle != 0) _vk.DestroyImageView(_device, _hdrMsaaView, null);
+            if (_hdrMsaaImage.Handle != 0) _vk.DestroyImage(_device, _hdrMsaaImage, null);
+            if (_hdrMsaaMemory.Handle != 0) _vk.FreeMemory(_device, _hdrMsaaMemory, null);
+            _hdrMsaaView = default; _hdrMsaaImage = default; _hdrMsaaMemory = default;
+
             if (_hdrView.Handle != 0) _vk.DestroyImageView(_device, _hdrView, null);
             if (_hdrImage.Handle != 0) _vk.DestroyImage(_device, _hdrImage, null);
             if (_hdrMemory.Handle != 0) _vk.FreeMemory(_device, _hdrMemory, null);

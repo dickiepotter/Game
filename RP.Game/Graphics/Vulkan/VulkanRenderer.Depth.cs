@@ -21,9 +21,10 @@ namespace RP.Game.Graphics.Vulkan
 
         private void CreateDepthResources()
         {
+            // Multisampled to match the scene's MSAA colour target (sample counts must agree).
             (_depthImage, _depthMemory) = CreateImage(
                 _swapchainExtent.Width, _swapchainExtent.Height, _depthFormat,
-                ImageUsageFlags.DepthStencilAttachmentBit);
+                ImageUsageFlags.DepthStencilAttachmentBit, _msaaSamples);
 
             var viewInfo = new ImageViewCreateInfo
             {
