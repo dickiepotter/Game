@@ -32,13 +32,18 @@ namespace RP.Game.Graphics.Vulkan
         private DeviceMemory _meshIndexMemory;
         private uint _meshIndexCount;
 
-        // Phase 2 instancing + culling. The full grid lives on the CPU (_instanceMaster); each frame we
-        // cull it to the camera frustum into _cullScratch and copy the survivors into that frame's own
+        // Phase 2 instancing + culling, now fed from outside via SetInstances. The scene's instances live on
+        // the CPU as true (double) world positions + colour + scale; each frame we rebase them to render
+        // space, cull to the camera frustum into _cullScratch, and copy the survivors into that frame's own
         // host-visible, persistently-mapped instance buffer (one per frame-in-flight, so the CPU never
         // overwrites data the GPU is still reading).
-        private InstanceData[] _instanceMaster = System.Array.Empty<InstanceData>();   // true-space offsets
-        private InstanceData[] _renderInstances = System.Array.Empty<InstanceData>();  // rebased to render space
-        private InstanceData[] _cullScratch = System.Array.Empty<InstanceData>();
+        private const int MaxInstances = 8192;
+        private readonly Vector3d[] _instanceWorld = new Vector3d[MaxInstances]; // true-space positions
+        private readonly Vector3[] _instanceColor = new Vector3[MaxInstances];
+        private readonly float[] _instanceScale = new float[MaxInstances];
+        private int _instanceCount;
+        private readonly InstanceData[] _renderInstances = new InstanceData[MaxInstances]; // rebased to render space
+        private readonly InstanceData[] _cullScratch = new InstanceData[MaxInstances];
         private readonly Buffer[] _dynamicInstanceBuffers = new Buffer[MaxFramesInFlight];
         private readonly DeviceMemory[] _dynamicInstanceMemories = new DeviceMemory[MaxFramesInFlight];
         private readonly nint[] _dynamicInstanceMapped = new nint[MaxFramesInFlight];
@@ -50,34 +55,12 @@ namespace RP.Game.Graphics.Vulkan
         private const float CubeBoundingRadius = 0.8660254f;
 
         /// <summary>
-        /// Builds a 3D grid of cube instances centred on the origin — the Phase 2 "thousands of instanced
-        /// objects" load — and the per-frame buffers the culled survivors are streamed into.
+        /// Allocates the per-frame, host-visible instance buffers (one per frame-in-flight) the culled
+        /// survivors are streamed into. The scene's instances are supplied each frame by <see cref="SetInstances"/>.
         /// </summary>
-        private void CreateInstanceGrid(int countPerAxis = 16, float spacing = 2.0f)
+        private void CreateInstanceBuffers()
         {
-            int n = countPerAxis;
-            float half = (n - 1) * spacing * 0.5f;
-            var instances = new System.Collections.Generic.List<InstanceData>(n * n * n);
-
-            for (int x = 0; x < n; x++)
-            {
-                for (int y = 0; y < n; y++)
-                {
-                    for (int z = 0; z < n; z++)
-                    {
-                        var offset = new Vector3(x * spacing - half, y * spacing - half, z * spacing - half);
-                        var color = new Vector3((float)x / (n - 1), (float)y / (n - 1), (float)z / (n - 1));
-                        instances.Add(new InstanceData(offset, color));
-                    }
-                }
-            }
-
-            _instanceMaster = instances.ToArray();
-            _renderInstances = new InstanceData[_instanceMaster.Length];
-            _cullScratch = new InstanceData[_instanceMaster.Length];
-
-            // One host-visible, persistently-mapped instance buffer per frame in flight.
-            ulong capacity = (ulong)(_instanceMaster.Length * sizeof(InstanceData));
+            ulong capacity = (ulong)(MaxInstances * sizeof(InstanceData));
             for (int i = 0; i < MaxFramesInFlight; i++)
             {
                 (_dynamicInstanceBuffers[i], _dynamicInstanceMemories[i]) = CreateBuffer(
@@ -90,40 +73,66 @@ namespace RP.Game.Graphics.Vulkan
                 _dynamicInstanceMapped[i] = (nint)mapped;
             }
 
-            _log.Info("Vulkan", $"Instance grid: {_instanceMaster.Length} cubes, frustum-culled each frame.");
+            _log.Info("Vulkan", $"Instance buffers ready: capacity {MaxInstances}, frustum-culled each frame.");
         }
 
         /// <summary>
-        /// Culls the master grid against the camera frustum and copies the survivors into the given
-        /// frame's mapped instance buffer. Sets <see cref="_visibleInstanceCount"/> for the draw call.
+        /// Replaces the set of instances drawn from next frame: true (double) world positions, per-instance
+        /// colours, and uniform scales (so one cube can be a fighter or a capital). Excess past
+        /// <see cref="MaxInstances"/> is dropped. This is how the game hands the renderer the live scene —
+        /// ships, debris, projectiles — each frame.
+        /// </summary>
+        public void SetInstances(ReadOnlySpan<Vector3d> worldPositions, ReadOnlySpan<Vector3> colors, ReadOnlySpan<float> scales)
+        {
+            int count = Math.Min(worldPositions.Length, MaxInstances);
+            for (int i = 0; i < count; i++)
+            {
+                _instanceWorld[i] = worldPositions[i];
+                _instanceColor[i] = colors[i];
+                _instanceScale[i] = scales[i];
+            }
+
+            _instanceCount = count;
+        }
+
+        /// <summary>
+        /// Rebases the live instances into render space, culls them to the camera frustum, and copies the
+        /// survivors into the given frame's mapped instance buffer. Sets <see cref="_visibleInstanceCount"/>
+        /// for the draw call.
         /// </summary>
         private void CullAndUploadInstances(int frameIndex)
         {
             // Rebase every instance from true world space into render space (subtract the floating origin),
             // so culling and drawing happen in the small-coordinate space centred on the player.
-            for (int i = 0; i < _instanceMaster.Length; i++)
+            float maxScale = 1f;
+            for (int i = 0; i < _instanceCount; i++)
             {
-                var renderOffset = (Vector3)((Vector3d)_instanceMaster[i].Offset - RenderOrigin);
-                _renderInstances[i] = new InstanceData(renderOffset, _instanceMaster[i].Color);
+                var renderOffset = (Vector3)(_instanceWorld[i] - RenderOrigin);
+                _renderInstances[i] = new InstanceData(renderOffset, _instanceColor[i], _instanceScale[i]);
+                if (_instanceScale[i] > maxScale) maxScale = _instanceScale[i];
             }
 
             Frustum frustum = Camera.Frustum;
-            int visible = Scene.FrustumCuller.Cull(frustum, _renderInstances, CubeBoundingRadius, _cullScratch);
+            int visible = Scene.FrustumCuller.Cull(
+                frustum,
+                _renderInstances.AsSpan(0, _instanceCount),
+                CubeBoundingRadius * maxScale, // conservative bound so big hulls aren't wrongly culled at the edge
+                _cullScratch.AsSpan(0, _instanceCount));
             _visibleInstanceCount = (uint)visible;
 
             if (visible > 0)
             {
                 ulong bytes = (ulong)(visible * sizeof(InstanceData));
-                ulong capacity = (ulong)(_instanceMaster.Length * sizeof(InstanceData));
+                ulong capacity = (ulong)(MaxInstances * sizeof(InstanceData));
                 fixed (InstanceData* src = _cullScratch)
                 {
                     System.Buffer.MemoryCopy(src, (void*)_dynamicInstanceMapped[frameIndex], capacity, bytes);
                 }
             }
 
-            if (!_loggedCull)
+            if (!_loggedCull && _instanceCount > 0)
             {
-                _log.Info("Vulkan", $"Frustum culling: {visible}/{_instanceMaster.Length} instances visible this frame.");
+                _log.Info("Vulkan", $"Frustum culling: {visible}/{_instanceCount} instances visible this frame.");
                 _loggedCull = true;
             }
         }

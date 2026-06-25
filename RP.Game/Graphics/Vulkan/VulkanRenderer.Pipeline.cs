@@ -71,8 +71,8 @@ namespace RP.Game.Graphics.Vulkan
                 Binding = 1, Stride = (uint)sizeof(InstanceData), InputRate = VertexInputRate.Instance,
             };
 
-            // Per-vertex: position @0, normal @12, colour @24. Per-instance: offset @0, colour @12.
-            var attributeDescriptions = stackalloc VertexInputAttributeDescription[5];
+            // Per-vertex: position @0, normal @12, colour @24. Per-instance: offset @0, colour @12, scale @24.
+            var attributeDescriptions = stackalloc VertexInputAttributeDescription[6];
             attributeDescriptions[0] = new VertexInputAttributeDescription
             {
                 Binding = 0, Location = 0, Format = Format.R32G32B32Sfloat, Offset = 0,
@@ -93,12 +93,16 @@ namespace RP.Game.Graphics.Vulkan
             {
                 Binding = 1, Location = 4, Format = Format.R32G32B32Sfloat, Offset = vec3Size,
             };
+            attributeDescriptions[5] = new VertexInputAttributeDescription
+            {
+                Binding = 1, Location = 5, Format = Format.R32Sfloat, Offset = 2 * vec3Size,
+            };
             var vertexInput = new PipelineVertexInputStateCreateInfo
             {
                 SType = StructureType.PipelineVertexInputStateCreateInfo,
                 VertexBindingDescriptionCount = 2,
                 PVertexBindingDescriptions = bindingDescriptions,
-                VertexAttributeDescriptionCount = 5,
+                VertexAttributeDescriptionCount = 6,
                 PVertexAttributeDescriptions = attributeDescriptions,
             };
 

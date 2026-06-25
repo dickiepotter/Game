@@ -16,14 +16,15 @@ layout(location = 2) in vec3 inColor;
 // Per-instance (binding 1)
 layout(location = 3) in vec3 inOffset;
 layout(location = 4) in vec3 inInstanceColor;
+layout(location = 5) in float inScale;
 
 layout(location = 0) out vec3 fragColor;
 
 void main()
 {
-    // Spin the cube about its own centre, then translate to the instance's grid slot.
+    // Spin the cube about its own centre, scale it to the instance's size, then translate into place.
     vec3 spun = (pc.spin * vec4(inPosition, 1.0)).xyz;
-    vec3 worldPos = spun + inOffset;
+    vec3 worldPos = spun * inScale + inOffset;
     gl_Position = pc.viewProj * vec4(worldPos, 1.0);
 
     vec3 worldNormal = normalize(mat3(pc.spin) * inNormal);

@@ -144,7 +144,7 @@ namespace RP.Game.Graphics.Vulkan
             CreateCommandPool();
             CreateCommandBuffers();
             CreateCubeMesh(); // needs the command pool + graphics queue for the staging upload
-            CreateInstanceGrid();
+            CreateInstanceBuffers();
             CreateSyncObjects();
 
             _log.Info("Vulkan", $"Renderer up: {_swapchainImages.Length} swapchain images at " +
