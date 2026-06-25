@@ -120,6 +120,11 @@ namespace RP.Game.Audio
             _al.SetSourceProperty(source, SourceFloat.Gain, gain);
             _al.SetSourceProperty(source, SourceFloat.Pitch, pitch <= 0 ? 1f : pitch);
             _al.SetSourceProperty(source, SourceBoolean.Looping, false);
+            // A wide reference/rolloff so battle sounds carry across the kilometre-scale fight instead of
+            // attenuating to silence a few hundred metres out (OpenAL's default reference distance is 1).
+            _al.SetSourceProperty(source, SourceFloat.ReferenceDistance, 400f);
+            _al.SetSourceProperty(source, SourceFloat.MaxDistance, 9000f);
+            _al.SetSourceProperty(source, SourceFloat.RolloffFactor, 0.8f);
             _al.SourcePlay(source);
         }
 

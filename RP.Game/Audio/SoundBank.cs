@@ -68,6 +68,27 @@ namespace RP.Game.Audio
             return samples;
         }
 
+        /// <summary>A weapon impact: a short, bright noise crackle with a fast decay — the "zat" of a hit.</summary>
+        public static short[] GenerateImpact(int seed = 1, float seconds = 0.16f, int sampleRate = 44100, float amplitude = 0.5f)
+        {
+            int count = Math.Max(1, (int)(seconds * sampleRate));
+            var samples = new short[count];
+            var rng = new Random(seed);
+            double hp = 0; // crude high-pass state for a brighter crack
+            for (int i = 0; i < count; i++)
+            {
+                double frac = (double)i / count;
+                double env = Math.Exp(-12.0 * frac);
+                double white = rng.NextDouble() * 2.0 - 1.0;
+                hp = white - hp * 0.5;
+                double tone = Math.Sin(2.0 * Math.PI * 520.0 * (i / (double)sampleRate));
+                double v = (0.7 * hp + 0.3 * tone) * env * amplitude;
+                samples[i] = (short)(Math.Clamp(v, -1.0, 1.0) * short.MaxValue);
+            }
+
+            return samples;
+        }
+
         /// <summary>
         /// An explosion: filtered noise plus a low boom, under an exponential decay — a thump with a tail.
         /// Seeded so it is deterministic; vary <paramref name="seed"/> per call for non-identical blasts.
