@@ -155,58 +155,18 @@ namespace RP.Game.Graphics.Vulkan
         }
 
         /// <summary>
-        /// Builds a unit cube (centred on the origin, ±0.5) with a distinct colour and an outward normal
-        /// per face, in device-local vertex and index buffers. Each face is 4 vertices and 2 triangles;
-        /// sharing the 8 corners would break per-face normals, so we use 24 vertices (4 per face).
+        /// Builds the instanced mesh every object is drawn with: a low-poly <see cref="Primitives.Dart"/> hull
+        /// (a ship, not a box), uploaded once to device-local vertex + index buffers. Per-instance scale and
+        /// colour (set each frame) turn the one mesh into fighters, capitals and debris.
         /// </summary>
         private void CreateCubeMesh()
         {
-            // Eight corners of the unit cube.
-            Vector3 P(float x, float y, float z) => new Vector3(x, y, z);
-            var c000 = P(-0.5f, -0.5f, -0.5f);
-            var c100 = P(0.5f, -0.5f, -0.5f);
-            var c110 = P(0.5f, 0.5f, -0.5f);
-            var c010 = P(-0.5f, 0.5f, -0.5f);
-            var c001 = P(-0.5f, -0.5f, 0.5f);
-            var c101 = P(0.5f, -0.5f, 0.5f);
-            var c111 = P(0.5f, 0.5f, 0.5f);
-            var c011 = P(-0.5f, 0.5f, 0.5f);
-
-            // Six faces, each: four corners (CCW from outside) + outward normal + a face colour.
-            var vertices = new System.Collections.Generic.List<Vertex>(24);
-            void Face(Vector3 a, Vector3 b, Vector3 c, Vector3 d, Vector3 normal, Vector3 color)
-            {
-                vertices.Add(new Vertex(a, normal, color));
-                vertices.Add(new Vertex(b, normal, color));
-                vertices.Add(new Vertex(c, normal, color));
-                vertices.Add(new Vertex(d, normal, color));
-            }
-
-            Face(c001, c101, c111, c011, P(0, 0, 1), P(0.90f, 0.20f, 0.20f)); // +Z front  red
-            Face(c100, c000, c010, c110, P(0, 0, -1), P(0.20f, 0.80f, 0.30f)); // -Z back   green
-            Face(c101, c100, c110, c111, P(1, 0, 0), P(0.25f, 0.45f, 0.95f)); // +X right  blue
-            Face(c000, c001, c011, c010, P(-1, 0, 0), P(0.95f, 0.80f, 0.25f)); // -X left   yellow
-            Face(c011, c111, c110, c010, P(0, 1, 0), P(0.30f, 0.85f, 0.90f)); // +Y top    cyan
-            Face(c000, c100, c101, c001, P(0, -1, 0), P(0.90f, 0.35f, 0.85f)); // -Y bottom magenta
-
-            // Two triangles per face (0,1,2) + (0,2,3), offset by 4 per face.
-            var indices = new System.Collections.Generic.List<ushort>(36);
-            for (ushort face = 0; face < 6; face++)
-            {
-                ushort b = (ushort)(face * 4);
-                indices.Add((ushort)(b + 0));
-                indices.Add((ushort)(b + 1));
-                indices.Add((ushort)(b + 2));
-                indices.Add((ushort)(b + 0));
-                indices.Add((ushort)(b + 2));
-                indices.Add((ushort)(b + 3));
-            }
-
-            _meshIndexCount = (uint)indices.Count;
+            Primitives.Mesh mesh = Primitives.Dart();
+            _meshIndexCount = (uint)mesh.Indices.Length;
             (_meshVertexBuffer, _meshVertexMemory) =
-                CreateDeviceLocalBuffer<Vertex>(vertices.ToArray(), BufferUsageFlags.VertexBufferBit);
+                CreateDeviceLocalBuffer<Vertex>(mesh.Vertices, BufferUsageFlags.VertexBufferBit);
             (_meshIndexBuffer, _meshIndexMemory) =
-                CreateDeviceLocalBuffer<ushort>(indices.ToArray(), BufferUsageFlags.IndexBufferBit);
+                CreateDeviceLocalBuffer<ushort>(mesh.Indices, BufferUsageFlags.IndexBufferBit);
         }
 
         /// <summary>Creates an image and binds a fresh device-local memory block to it. Used for the depth
