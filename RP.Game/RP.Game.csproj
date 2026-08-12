@@ -54,19 +54,51 @@
   </ItemGroup>
 
   <PropertyGroup>
-    <!-- Locate glslc: prefer the VULKAN_SDK env var; fall back to the known install if it is not yet
-         exported in this shell. Generalise the fallback if the SDK ever moves (recorded in BUILD_LOG). -->
+    <!-- Locate glslc: prefer the VULKAN_SDK env var, which the SDK installer exports. It is absent in
+         shells opened before the install, so fall back to scanning the default install root and taking
+         the highest version present (LocateVulkanSdk below) rather than pinning one version number, as
+         a pinned path silently stops matching the moment the SDK is upgraded. -->
     <VulkanSdkDir Condition="'$(VULKAN_SDK)' != ''">$(VULKAN_SDK)</VulkanSdkDir>
-    <VulkanSdkDir Condition="'$(VulkanSdkDir)' == '' and Exists('C:\VulkanSDK\1.4.350.0')">C:\VulkanSDK\1.4.350.0</VulkanSdkDir>
-    <Glslc>$(VulkanSdkDir)\Bin\glslc.exe</Glslc>
-    <SpirvDir>$(IntermediateOutputPath)shaders\</SpirvDir>
+    <VulkanSdkRoot Condition="'$(VulkanSdkRoot)' == ''">C:\VulkanSDK</VulkanSdkRoot>
+    <Glslc Condition="'$(VulkanSdkDir)' != ''">$(VulkanSdkDir)\Bin\glslc.exe</Glslc>
+
+    <!-- Target the SPIR-V dialect of Vulkan 1.2, not 1.3. A 1.3 target emits SPIR-V 1.6, which drivers
+         that top out at Vulkan 1.2 reject outright (vkCreateShaderModule fails) even though the renderer
+         itself runs there happily via VK_KHR_dynamic_rendering, which is an API-side feature and asks
+         nothing of the bytecode. Every shader here is plain "#version 450" with no
+         extensions, so 1.2 costs us nothing and the SPIR-V loads on both driver generations. Raise this
+         only when a shader genuinely needs newer semantics, and expect to drop pre-1.3 devices if so. -->
+    <ShaderTargetEnv Condition="'$(ShaderTargetEnv)' == ''">vulkan1.2</ShaderTargetEnv>
+
+    <!-- The compiled SPIR-V lives here in the source tree, and is committed. That is load-bearing:
+         it lets contributors without the Vulkan SDK build the solution, since CompileShaders is skipped
+         while the .spv are newer than the .vert/.frag. Written literally rather than through
+         $(IntermediateOutputPath), which is empty this early (the SDK defines it in its .targets, which
+         import after this body) and so silently resolved to exactly this path anyway. -->
+    <SpirvDir>shaders\</SpirvDir>
   </PropertyGroup>
 
-  <!-- Compile GLSL -> SPIR-V. Incremental (Inputs/Outputs): only recompiles changed shaders. -->
-  <Target Name="CompileShaders" BeforeTargets="AssignTargetPaths" Inputs="@(ShaderSource)" Outputs="@(ShaderSource->'$(SpirvDir)%(Filename)%(Extension).spv')">
-    <Error Condition="!Exists('$(Glslc)')" Text="glslc not found at '$(Glslc)'. Install the Vulkan SDK or set VULKAN_SDK." />
+  <!-- VULKAN_SDK was not set, so look for an installed SDK. Directory names sort as versions here
+       (1.4.350.0, 1.4.357.0), so the last entry is the newest. Done in a target because the scan needs
+       the filesystem, and skipped entirely when the env var already answered the question. -->
+  <Target Name="LocateVulkanSdk" BeforeTargets="CompileShaders" Condition="'$(Glslc)' == ''">
+    <ItemGroup>
+      <VulkanSdkCandidate Include="$([System.IO.Directory]::GetDirectories('$(VulkanSdkRoot)'))" Condition="Exists('$(VulkanSdkRoot)')" />
+    </ItemGroup>
+    <!-- Batching over the item assigns each in turn, leaving the last (highest version) in place. -->
+    <PropertyGroup>
+      <VulkanSdkDir Condition="Exists('%(VulkanSdkCandidate.Identity)\Bin\glslc.exe')">%(VulkanSdkCandidate.Identity)</VulkanSdkDir>
+      <Glslc Condition="'$(VulkanSdkDir)' != ''">$(VulkanSdkDir)\Bin\glslc.exe</Glslc>
+    </PropertyGroup>
+  </Target>
+
+  <!-- Compile GLSL -> SPIR-V. Incremental (Inputs/Outputs): only recompiles changed shaders. This file
+       counts as an input too, so editing ShaderTargetEnv rebuilds the bytecode instead of leaving SPIR-V
+       compiled for the previous target sitting there looking current. -->
+  <Target Name="CompileShaders" DependsOnTargets="LocateVulkanSdk" BeforeTargets="AssignTargetPaths" Inputs="@(ShaderSource);$(MSBuildProjectFullPath)" Outputs="@(ShaderSource->'$(SpirvDir)%(Filename)%(Extension).spv')">
+    <Error Condition="'$(Glslc)' == '' or !Exists('$(Glslc)')" Text="glslc not found (looked at VULKAN_SDK, then '$(VulkanSdkRoot)'). Install the Vulkan SDK, or set VULKAN_SDK to its root." />
     <MakeDir Directories="$(SpirvDir)" />
-    <Exec Command="&quot;$(Glslc)&quot; --target-env=vulkan1.3 &quot;%(ShaderSource.FullPath)&quot; -o &quot;$(SpirvDir)%(ShaderSource.Filename)%(ShaderSource.Extension).spv&quot;" />
+    <Exec Command="&quot;$(Glslc)&quot; --target-env=$(ShaderTargetEnv) &quot;%(ShaderSource.FullPath)&quot; -o &quot;$(SpirvDir)%(ShaderSource.Filename)%(ShaderSource.Extension).spv&quot;" />
   </Target>
 
   <!-- Embed the compiled SPIR-V into the assembly. Runs *every* build (no Inputs/Outputs) and before

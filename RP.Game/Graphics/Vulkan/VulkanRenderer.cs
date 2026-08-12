@@ -14,7 +14,8 @@ namespace RP.Game.Graphics.Vulkan
     using Silk.NET.Windowing;
 
     /// <summary>
-    /// A from-scratch Vulkan 1.3 renderer. At Phase 0 it does one thing — clear the screen to a colour
+    /// A from-scratch Vulkan renderer, targeting 1.3 but running on 1.x drivers that offer dynamic
+    /// rendering as an extension. At Phase 0 it does one thing — clear the screen to a colour
     /// every frame — but it stands up the entire Vulkan spine needed for everything after: instance,
     /// validation, device and queues, swapchain, command buffers, and multi-frame synchronisation.
     /// </summary>
@@ -72,6 +73,15 @@ namespace RP.Game.Graphics.Vulkan
         private uint _presentFamily;
         private Queue _graphicsQueue;
         private Queue _presentQueue;
+
+        // ---- Dynamic rendering ----
+        // Dynamic rendering is core in Vulkan 1.3, but it shipped first as VK_KHR_dynamic_rendering and
+        // plenty of still-current drivers only report 1.2. The two are the same feature with the same
+        // structs; only the entry points differ, so we resolve them once here and route every
+        // begin/end through BeginRendering/EndRendering rather than branching at each call site.
+        // Null means the device is 1.3 and the core vkCmd* entry points apply.
+        private KhrDynamicRendering? _khrDynamicRendering;
+        private bool _dynamicRenderingViaExtension;
 
         // ---- Swapchain ----
         private KhrSwapchain _khrSwapchain = null!;
@@ -382,6 +392,7 @@ namespace RP.Game.Graphics.Vulkan
                 if (!TryFindQueueFamilies(device, out _, out _)) continue;
                 if (!SupportsSwapchain(device)) continue;
                 if (!SwapchainAdequate(device)) continue;
+                if (!SupportsDynamicRendering(device, out _)) continue;
 
                 _vk.GetPhysicalDeviceProperties(device, out PhysicalDeviceProperties props);
                 int score = props.DeviceType == PhysicalDeviceType.DiscreteGpu ? 1000 : 100;
@@ -392,14 +403,25 @@ namespace RP.Game.Graphics.Vulkan
                 }
             }
 
-            if (bestScore < 0) throw new NotSupportedException("No suitable Vulkan GPU (graphics+present+swapchain).");
+            if (bestScore < 0)
+            {
+                throw new NotSupportedException(
+                    "No suitable Vulkan GPU. A device must support graphics, presentation, the swapchain " +
+                    "extension, and dynamic rendering (Vulkan 1.3, or 1.x with VK_KHR_dynamic_rendering). " +
+                    "If the GPU is recent, the graphics driver is the likely culprit — update it.");
+            }
 
             _physicalDevice = chosen;
             TryFindQueueFamilies(chosen, out _graphicsFamily, out _presentFamily);
+            SupportsDynamicRendering(chosen, out _dynamicRenderingViaExtension);
 
             _vk.GetPhysicalDeviceProperties(chosen, out PhysicalDeviceProperties chosenProps);
             string name = SilkMarshal.PtrToString((nint)chosenProps.DeviceName) ?? "(unknown)";
-            _log.Info("Vulkan", $"Selected GPU: {name} ({chosenProps.DeviceType}).");
+            var apiVersion = (Version32)chosenProps.ApiVersion;
+            _log.Info("Vulkan", $"Selected GPU: {name} ({chosenProps.DeviceType}), Vulkan {apiVersion.Major}.{apiVersion.Minor}.{apiVersion.Patch}.");
+            _log.Info("Vulkan", _dynamicRenderingViaExtension
+                ? "Dynamic rendering via VK_KHR_dynamic_rendering (device predates Vulkan 1.3)."
+                : "Dynamic rendering via core Vulkan 1.3.");
         }
 
         // A queue family is a group of GPU "lanes" with the same capabilities. We need one that can do
@@ -439,7 +461,7 @@ namespace RP.Game.Graphics.Vulkan
             return foundGraphics && foundPresent;
         }
 
-        private bool SupportsSwapchain(PhysicalDevice device)
+        private bool SupportsExtension(PhysicalDevice device, string extensionName)
         {
             uint count = 0;
             _vk.EnumerateDeviceExtensionProperties(device, (byte*)null, ref count, null);
@@ -452,10 +474,52 @@ namespace RP.Game.Graphics.Vulkan
             foreach (var ext in available)
             {
                 string name = SilkMarshal.PtrToString((nint)ext.ExtensionName) ?? string.Empty;
-                if (name == KhrSwapchain.ExtensionName) return true;
+                if (name == extensionName) return true;
             }
 
             return false;
+        }
+
+        private bool SupportsSwapchain(PhysicalDevice device) =>
+            SupportsExtension(device, KhrSwapchain.ExtensionName);
+
+        /// <summary>
+        /// Reports whether <paramref name="device"/> can do dynamic rendering — the one Vulkan 1.3 feature
+        /// this engine genuinely depends on (brief S4.2), since it draws with no render-pass or framebuffer
+        /// objects at all.
+        /// </summary>
+        /// <param name="viaExtension">Set when the device reaches the feature through
+        /// VK_KHR_dynamic_rendering rather than core 1.3. That distinction decides both how the logical
+        /// device is built and which entry points record the draws.</param>
+        /// <remarks>
+        /// The extension being *listed* is not enough: a driver may advertise it and still report the
+        /// feature bit as false, so we ask for the bit itself through vkGetPhysicalDeviceFeatures2. Doing
+        /// this during device selection means an unusable GPU is rejected here, with a clear message,
+        /// rather than surfacing later as a misleading vkCreateDevice error — AMD's older drivers answer
+        /// an unrecognised pNext feature struct with ErrorOutOfHostMemory, which reads as a memory fault.
+        /// </remarks>
+        private bool SupportsDynamicRendering(PhysicalDevice device, out bool viaExtension)
+        {
+            viaExtension = false;
+
+            _vk.GetPhysicalDeviceProperties(device, out PhysicalDeviceProperties props);
+            if (props.ApiVersion >= Vk.Version13) return true;
+
+            if (!SupportsExtension(device, KhrDynamicRendering.ExtensionName)) return false;
+
+            var dynamicRendering = new PhysicalDeviceDynamicRenderingFeaturesKHR
+            {
+                SType = StructureType.PhysicalDeviceDynamicRenderingFeaturesKhr,
+            };
+            var features2 = new PhysicalDeviceFeatures2
+            {
+                SType = StructureType.PhysicalDeviceFeatures2,
+                PNext = &dynamicRendering,
+            };
+            _vk.GetPhysicalDeviceFeatures2(device, &features2);
+
+            viaExtension = dynamicRendering.DynamicRendering;
+            return viaExtension;
         }
 
         private bool SwapchainAdequate(PhysicalDevice device)
@@ -489,24 +553,34 @@ namespace RP.Game.Graphics.Vulkan
 
             var deviceFeatures = new PhysicalDeviceFeatures();
 
-            // Vulkan 1.3 features are opted into through a struct chained on pNext.
+            // Opt into dynamic rendering. Which struct carries the request depends on how the device
+            // offers it: core 1.3 devices take PhysicalDeviceVulkan13Features, older ones the KHR
+            // struct. Chaining the 1.3 struct on a pre-1.3 driver is invalid and gets rejected — often
+            // with a nonsense result code — so PickPhysicalDevice has already settled which applies.
             var features13 = new PhysicalDeviceVulkan13Features
             {
                 SType = StructureType.PhysicalDeviceVulkan13Features,
                 DynamicRendering = true,
                 Synchronization2 = true,
             };
+            var featuresDynamicRendering = new PhysicalDeviceDynamicRenderingFeaturesKHR
+            {
+                SType = StructureType.PhysicalDeviceDynamicRenderingFeaturesKhr,
+                DynamicRendering = true,
+            };
 
-            byte** deviceExtensions = (byte**)SilkMarshal.StringArrayToPtr(new List<string> { KhrSwapchain.ExtensionName });
+            var extensions = new List<string> { KhrSwapchain.ExtensionName };
+            if (_dynamicRenderingViaExtension) extensions.Add(KhrDynamicRendering.ExtensionName);
+            byte** deviceExtensions = (byte**)SilkMarshal.StringArrayToPtr(extensions);
 
             var createInfo = new DeviceCreateInfo
             {
                 SType = StructureType.DeviceCreateInfo,
-                PNext = &features13,
+                PNext = _dynamicRenderingViaExtension ? &featuresDynamicRendering : (void*)&features13,
                 QueueCreateInfoCount = (uint)uniqueFamilies.Length,
                 PQueueCreateInfos = queueCreateInfos,
                 PEnabledFeatures = &deviceFeatures,
-                EnabledExtensionCount = 1,
+                EnabledExtensionCount = (uint)extensions.Count,
                 PpEnabledExtensionNames = deviceExtensions,
                 EnabledLayerCount = 0,
             };
@@ -521,6 +595,43 @@ namespace RP.Game.Graphics.Vulkan
             if (!_vk.TryGetDeviceExtension(_instance, _device, out _khrSwapchain))
             {
                 throw new NotSupportedException("VK_KHR_swapchain device extension is unavailable.");
+            }
+
+            // Resolve the KHR draw entry points once, so recording never has to re-check the route.
+            if (_dynamicRenderingViaExtension)
+            {
+                if (!_vk.TryGetDeviceExtension(_instance, _device, out KhrDynamicRendering khrDynamicRendering))
+                {
+                    throw new NotSupportedException("VK_KHR_dynamic_rendering device extension is unavailable.");
+                }
+
+                _khrDynamicRendering = khrDynamicRendering;
+            }
+        }
+
+        // The two routes into dynamic rendering take identical structs — only the entry point differs —
+        // so every draw goes through these and stays oblivious to which device it landed on.
+        private void BeginRendering(CommandBuffer cb, in RenderingInfo renderingInfo)
+        {
+            if (_khrDynamicRendering is not null)
+            {
+                _khrDynamicRendering.CmdBeginRendering(cb, in renderingInfo);
+            }
+            else
+            {
+                _vk.CmdBeginRendering(cb, in renderingInfo);
+            }
+        }
+
+        private void EndRendering(CommandBuffer cb)
+        {
+            if (_khrDynamicRendering is not null)
+            {
+                _khrDynamicRendering.CmdEndRendering(cb);
+            }
+            else
+            {
+                _vk.CmdEndRendering(cb);
             }
         }
 
@@ -953,10 +1064,10 @@ namespace RP.Game.Graphics.Vulkan
                 PDepthAttachment = &depthAttachment,
             };
 
-            _vk.CmdBeginRendering(cb, in renderingInfo);
+            BeginRendering(cb, in renderingInfo);
             RecordSky(cb);  // procedural starfield/nebula backdrop, behind everything
             RecordMesh(cb); // the lit hulls, depth-tested over the backdrop
-            _vk.CmdEndRendering(cb);
+            EndRendering(cb);
 
             // --- Post: bloom the HDR scene and composite + tonemap into the swapchain image, ready to present ---
             RecordPostChain(cb, imageIndex);

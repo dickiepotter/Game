@@ -405,7 +405,7 @@ namespace RP.Game.Graphics.Vulkan
                 RenderArea = new Rect2D(new Offset2D(0, 0), _swapchainExtent),
                 LayerCount = 1, ColorAttachmentCount = 1, PColorAttachments = &colorAttachment,
             };
-            _vk.CmdBeginRendering(cb, in renderingInfo);
+            BeginRendering(cb, in renderingInfo);
 
             var viewport = new Viewport { X = 0, Y = 0, Width = _swapchainExtent.Width, Height = _swapchainExtent.Height, MinDepth = 0, MaxDepth = 1 };
             _vk.CmdSetViewport(cb, 0, 1, in viewport);
@@ -418,7 +418,7 @@ namespace RP.Game.Graphics.Vulkan
 
             RecordHudDraw(cb); // HUD lines over the composited image
 
-            _vk.CmdEndRendering(cb);
+            EndRendering(cb);
 
             TransitionImage(cb, _swapchainImages[imageIndex], ImageLayout.ColorAttachmentOptimal, ImageLayout.PresentSrcKhr,
                 AccessFlags.ColorAttachmentWriteBit, 0,
@@ -453,7 +453,7 @@ namespace RP.Game.Graphics.Vulkan
                 PColorAttachments = &colorAttachment,
             };
 
-            _vk.CmdBeginRendering(cb, in renderingInfo);
+            BeginRendering(cb, in renderingInfo);
 
             var viewport = new Viewport { X = 0, Y = 0, Width = extent.Width, Height = extent.Height, MinDepth = 0, MaxDepth = 1 };
             _vk.CmdSetViewport(cb, 0, 1, in viewport);
@@ -468,7 +468,7 @@ namespace RP.Game.Graphics.Vulkan
             }
 
             _vk.CmdDraw(cb, 3, 1, 0, 0);
-            _vk.CmdEndRendering(cb);
+            EndRendering(cb);
         }
 
         private void DestroyPostResources()
