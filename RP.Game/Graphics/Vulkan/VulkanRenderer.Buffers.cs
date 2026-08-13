@@ -71,6 +71,27 @@ namespace RP.Game.Graphics.Vulkan
         private readonly nint[] _shipInstanceMapped = new nint[MaxFramesInFlight];
         private uint _shipVisible;
 
+        // Prop batches: additional caller-supplied meshes (asteroids/rocks, wreck hulls, station interiors,
+        // weapon bolts, …) each drawn as their own instanced batch with the same pipeline. A slot with no
+        // mesh set simply draws nothing, so the game can wire props up incrementally.
+        internal const int PropSlots = 4;
+        private const int MaxPropsPerSlot = 768;
+        private readonly Buffer[] _propVertexBuffers = new Buffer[PropSlots];
+        private readonly DeviceMemory[] _propVertexMemories = new DeviceMemory[PropSlots];
+        private readonly Buffer[] _propIndexBuffers = new Buffer[PropSlots];
+        private readonly DeviceMemory[] _propIndexMemories = new DeviceMemory[PropSlots];
+        private readonly uint[] _propIndexCounts = new uint[PropSlots];
+        private readonly Vector3d[][] _propWorld = new Vector3d[PropSlots][];
+        private readonly Vector3[][] _propColor = new Vector3[PropSlots][];
+        private readonly float[][] _propScale = new float[PropSlots][];
+        private readonly Vector4[][] _propRotation = new Vector4[PropSlots][];
+        private readonly int[] _propCount = new int[PropSlots];
+        private readonly InstanceData[][] _propRender = new InstanceData[PropSlots][];
+        private readonly Buffer[][] _propInstanceBuffers = new Buffer[PropSlots][];
+        private readonly DeviceMemory[][] _propInstanceMemories = new DeviceMemory[PropSlots][];
+        private readonly nint[][] _propInstanceMapped = new nint[PropSlots][];
+        private readonly uint[] _propVisible = new uint[PropSlots];
+
         // Phase 2 instancing + culling, now fed from outside via SetInstances. The scene's instances live on
         // the CPU as true (double) world positions + colour + scale; each frame we rebase them to render
         // space, cull to the camera frustum into _cullScratch, and copy the survivors into that frame's own
@@ -207,13 +228,14 @@ namespace RP.Game.Graphics.Vulkan
         }
 
         /// <summary>
-        /// Builds the instanced mesh every object is drawn with: a low-poly <see cref="Primitives.Dart"/> hull
-        /// (a ship, not a box), uploaded once to device-local vertex + index buffers. Per-instance scale and
-        /// colour (set each frame) turn the one mesh into fighters, capitals and debris.
+        /// Builds the default instanced FX mesh: a <see cref="Primitives.Orb"/> point of light. Everything
+        /// on this stream — dust, particles, engine glow, flares — is a glow, so a white sphere the
+        /// per-instance tint colours (and the bloom pass flares) reads correctly at every size. Ships and
+        /// props have their own batches with real meshes.
         /// </summary>
         private void CreateCubeMesh()
         {
-            Primitives.Mesh mesh = Primitives.Dart();
+            Primitives.Mesh mesh = Primitives.Orb();
             _meshIndexCount = (uint)mesh.Indices.Length;
             (_meshVertexBuffer, _meshVertexMemory) =
                 CreateDeviceLocalBuffer<Vertex>(mesh.Vertices, BufferUsageFlags.VertexBufferBit);
@@ -359,6 +381,124 @@ namespace RP.Game.Graphics.Vulkan
             fixed (InstanceData* src = _shipRender)
             {
                 System.Buffer.MemoryCopy(src, (void*)_shipInstanceMapped[frameIndex], capacity, bytes);
+            }
+        }
+
+        /// <summary>Allocates the per-slot prop instance arrays and per-frame instance buffers. Meshes arrive
+        /// later via <see cref="SetPropModel"/>; a slot without one draws nothing.</summary>
+        private void CreatePropBatches()
+        {
+            ulong capacity = (ulong)(MaxPropsPerSlot * sizeof(InstanceData));
+            for (int s = 0; s < PropSlots; s++)
+            {
+                _propWorld[s] = new Vector3d[MaxPropsPerSlot];
+                _propColor[s] = new Vector3[MaxPropsPerSlot];
+                _propScale[s] = new float[MaxPropsPerSlot];
+                _propRotation[s] = new Vector4[MaxPropsPerSlot];
+                _propRender[s] = new InstanceData[MaxPropsPerSlot];
+                _propInstanceBuffers[s] = new Buffer[MaxFramesInFlight];
+                _propInstanceMemories[s] = new DeviceMemory[MaxFramesInFlight];
+                _propInstanceMapped[s] = new nint[MaxFramesInFlight];
+
+                for (int i = 0; i < MaxFramesInFlight; i++)
+                {
+                    (_propInstanceBuffers[s][i], _propInstanceMemories[s][i]) = CreateBuffer(
+                        capacity,
+                        BufferUsageFlags.VertexBufferBit,
+                        MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit);
+                    void* mapped;
+                    _vk.MapMemory(_device, _propInstanceMemories[s][i], 0, capacity, 0, &mapped);
+                    _propInstanceMapped[s][i] = (nint)mapped;
+                }
+            }
+        }
+
+        /// <summary>Sets (or replaces) the mesh a prop slot draws — e.g. slot 0 a rock for asteroids and
+        /// debris, slot 1 a crumpled wreck hull. Safe after start-up; waits for the GPU to go idle.</summary>
+        public void SetPropModel(int slot, Vertex[] vertices, ushort[] indices)
+        {
+            if (slot < 0 || slot >= PropSlots) throw new ArgumentOutOfRangeException(nameof(slot));
+            if (vertices is null || indices is null || vertices.Length == 0 || indices.Length == 0) return;
+            _vk.DeviceWaitIdle(_device);
+
+            if (_propVertexBuffers[slot].Handle != 0) _vk.DestroyBuffer(_device, _propVertexBuffers[slot], null);
+            if (_propVertexMemories[slot].Handle != 0) _vk.FreeMemory(_device, _propVertexMemories[slot], null);
+            if (_propIndexBuffers[slot].Handle != 0) _vk.DestroyBuffer(_device, _propIndexBuffers[slot], null);
+            if (_propIndexMemories[slot].Handle != 0) _vk.FreeMemory(_device, _propIndexMemories[slot], null);
+
+            _propIndexCounts[slot] = (uint)indices.Length;
+            (_propVertexBuffers[slot], _propVertexMemories[slot]) =
+                CreateDeviceLocalBuffer<Vertex>(vertices, BufferUsageFlags.VertexBufferBit);
+            (_propIndexBuffers[slot], _propIndexMemories[slot]) =
+                CreateDeviceLocalBuffer<ushort>(indices, BufferUsageFlags.IndexBufferBit);
+            _log.Info("Vulkan", $"Prop mesh {slot} set: {vertices.Length} vertices, {indices.Length / 3} triangles.");
+        }
+
+        /// <summary>Supplies the instances a prop slot draws this frame (true positions, tint, scale,
+        /// orientation). Excess past the per-slot capacity is dropped.</summary>
+        public void SetPropInstances(
+            int slot, ReadOnlySpan<Vector3d> worldPositions, ReadOnlySpan<Vector3> colors,
+            ReadOnlySpan<float> scales, ReadOnlySpan<Vector4> rotations)
+        {
+            if (slot < 0 || slot >= PropSlots) throw new ArgumentOutOfRangeException(nameof(slot));
+            int count = Math.Min(worldPositions.Length, MaxPropsPerSlot);
+            for (int i = 0; i < count; i++)
+            {
+                _propWorld[slot][i] = worldPositions[i];
+                _propColor[slot][i] = colors[i];
+                _propScale[slot][i] = scales[i];
+                _propRotation[slot][i] = i < rotations.Length ? rotations[i] : Vector4.UnitW;
+            }
+
+            _propCount[slot] = count;
+        }
+
+        // Rebase each slot's prop instances into render space and stream them into this frame's buffer.
+        private void UploadProps(int frameIndex)
+        {
+            for (int s = 0; s < PropSlots; s++)
+            {
+                int count = _propCount[s];
+                _propVisible[s] = _propIndexCounts[s] == 0 ? 0u : (uint)count;
+                if (count == 0 || _propIndexCounts[s] == 0) continue;
+
+                for (int i = 0; i < count; i++)
+                {
+                    var renderOffset = (Vector3)(_propWorld[s][i] - RenderOrigin);
+                    _propRender[s][i] = new InstanceData(renderOffset, _propColor[s][i], _propScale[s][i], _propRotation[s][i]);
+                }
+
+                ulong bytes = (ulong)(count * sizeof(InstanceData));
+                ulong capacity = (ulong)(MaxPropsPerSlot * sizeof(InstanceData));
+                fixed (InstanceData* src = _propRender[s])
+                {
+                    System.Buffer.MemoryCopy(src, (void*)_propInstanceMapped[s][frameIndex], capacity, bytes);
+                }
+            }
+        }
+
+        private void DestroyPropResources()
+        {
+            for (int s = 0; s < PropSlots; s++)
+            {
+                if (_propInstanceBuffers[s] is null) continue;
+                for (int i = 0; i < MaxFramesInFlight; i++)
+                {
+                    if (_propInstanceMemories[s][i].Handle != 0)
+                    {
+                        _vk.UnmapMemory(_device, _propInstanceMemories[s][i]);
+                        _vk.FreeMemory(_device, _propInstanceMemories[s][i], null);
+                    }
+                    if (_propInstanceBuffers[s][i].Handle != 0)
+                    {
+                        _vk.DestroyBuffer(_device, _propInstanceBuffers[s][i], null);
+                    }
+                }
+
+                if (_propVertexBuffers[s].Handle != 0) _vk.DestroyBuffer(_device, _propVertexBuffers[s], null);
+                if (_propVertexMemories[s].Handle != 0) _vk.FreeMemory(_device, _propVertexMemories[s], null);
+                if (_propIndexBuffers[s].Handle != 0) _vk.DestroyBuffer(_device, _propIndexBuffers[s], null);
+                if (_propIndexMemories[s].Handle != 0) _vk.FreeMemory(_device, _propIndexMemories[s], null);
             }
         }
 

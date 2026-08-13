@@ -160,6 +160,170 @@ namespace RP.Game.Rendering
             return new Mesh(v.ToArray(), idx.ToArray());
         }
 
+        /// <summary>
+        /// A jagged rock within the unit box (±0.5): an icosphere with each vertex pushed in/out by a
+        /// deterministic hash of its direction, flat-shaded so the facets catch light like fractured stone.
+        /// One seed = one shape, so a field of asteroids can draw many differently-lumpy rocks from a few
+        /// uploaded variants (per-instance scale/rotation does the rest of the variety).
+        /// </summary>
+        public static Mesh Rock(int seed = 1)
+        {
+            // Icosahedron base: 12 vertices, 20 faces, subdivided once to 80 faces — enough silhouette
+            // for a boulder while staying trivially cheap next to the ship hull.
+            float t = (1f + (float)System.Math.Sqrt(5.0)) / 2f;
+            var baseVerts = new[]
+            {
+                new Vector3(-1, t, 0), new Vector3(1, t, 0), new Vector3(-1, -t, 0), new Vector3(1, -t, 0),
+                new Vector3(0, -1, t), new Vector3(0, 1, t), new Vector3(0, -1, -t), new Vector3(0, 1, -t),
+                new Vector3(t, 0, -1), new Vector3(t, 0, 1), new Vector3(-t, 0, -1), new Vector3(-t, 0, 1),
+            };
+            var faces = new[]
+            {
+                (0, 11, 5), (0, 5, 1), (0, 1, 7), (0, 7, 10), (0, 10, 11),
+                (1, 5, 9), (5, 11, 4), (11, 10, 2), (10, 7, 6), (7, 1, 8),
+                (3, 9, 4), (3, 4, 2), (3, 2, 6), (3, 6, 8), (3, 8, 9),
+                (4, 9, 5), (2, 4, 11), (6, 2, 10), (8, 6, 7), (9, 8, 1),
+            };
+
+            // Deterministic per-direction bumpiness: hash the (rounded) unit direction with the seed. The
+            // rounding keeps shared edge vertices hashing identically, so subdivided faces stay watertight.
+            float Bump(Vector3 unit)
+            {
+                int hx = (int)System.Math.Round(unit.X * 512f);
+                int hy = (int)System.Math.Round(unit.Y * 512f);
+                int hz = (int)System.Math.Round(unit.Z * 512f);
+                uint h = (uint)(seed * 374761393 + hx * 668265263 + hy * 2246822519 + hz * 3266489917);
+                h = (h ^ (h >> 15)) * 2246822519u;
+                h = (h ^ (h >> 13)) * 3266489917u;
+                return ((h ^ (h >> 16)) & 0xFFFF) / 65535f; // 0..1
+            }
+
+            // Displaced radius: 0.30 .. 0.50, so the rock always fits the unit box in any orientation.
+            Vector3 Place(Vector3 v)
+            {
+                Vector3 unit = v.Normalize();
+                return unit * (0.30f + 0.20f * Bump(unit));
+            }
+
+            var v = new List<Vertex>(240);
+            var idx = new List<ushort>(240);
+            var rockLight = new Vector3(0.46f, 0.42f, 0.37f); // sunlit dusty stone
+            var rockDark = new Vector3(0.28f, 0.26f, 0.24f);  // crevice
+
+            void Tri(Vector3 a, Vector3 b, Vector3 c)
+            {
+                Vector3 n = Vector3.Cross(b - a, c - a).Normalize();
+                // Facets that dip inward (short mean radius) read as darker, cracked stone.
+                float mean = (a.Length + b.Length + c.Length) / 3f;
+                float shade = (mean - 0.30f) / 0.20f;
+                Vector3 col = rockDark + (rockLight - rockDark) * System.Math.Clamp(shade, 0f, 1f);
+                var i = (ushort)v.Count;
+                v.Add(new Vertex(a, n, col));
+                v.Add(new Vertex(b, n, col));
+                v.Add(new Vertex(c, n, col));
+                idx.Add(i); idx.Add((ushort)(i + 1)); idx.Add((ushort)(i + 2));
+            }
+
+            foreach ((int fa, int fb, int fc) in faces)
+            {
+                Vector3 a = baseVerts[fa], b = baseVerts[fb], c = baseVerts[fc];
+                // Midpoint (1-level) subdivision: 4 triangles per face.
+                Vector3 ab = (a + b) * 0.5f, bc = (b + c) * 0.5f, ca = (c + a) * 0.5f;
+                Tri(Place(a), Place(ab), Place(ca));
+                Tri(Place(ab), Place(b), Place(bc));
+                Tri(Place(ca), Place(bc), Place(c));
+                Tri(Place(ab), Place(bc), Place(ca));
+            }
+
+            return new Mesh(v.ToArray(), idx.ToArray());
+        }
+
+        /// <summary>
+        /// A glow orb for point FX (particles, dust, engine bloom, flares): an icosahedron of radius 0.5
+        /// with pure-white vertices, so the per-instance tint IS the final colour and the HDR bloom turns
+        /// each one into a soft point of light rather than a recognisable solid.
+        /// </summary>
+        public static Mesh Orb()
+        {
+            float t = (1f + (float)System.Math.Sqrt(5.0)) / 2f;
+            var raw = new[]
+            {
+                new Vector3(-1, t, 0), new Vector3(1, t, 0), new Vector3(-1, -t, 0), new Vector3(1, -t, 0),
+                new Vector3(0, -1, t), new Vector3(0, 1, t), new Vector3(0, -1, -t), new Vector3(0, 1, -t),
+                new Vector3(t, 0, -1), new Vector3(t, 0, 1), new Vector3(-t, 0, -1), new Vector3(-t, 0, 1),
+            };
+            var faces = new[]
+            {
+                (0, 11, 5), (0, 5, 1), (0, 1, 7), (0, 7, 10), (0, 10, 11),
+                (1, 5, 9), (5, 11, 4), (11, 10, 2), (10, 7, 6), (7, 1, 8),
+                (3, 9, 4), (3, 4, 2), (3, 2, 6), (3, 6, 8), (3, 8, 9),
+                (4, 9, 5), (2, 4, 11), (6, 2, 10), (8, 6, 7), (9, 8, 1),
+            };
+
+            var v = new List<Vertex>(60);
+            var idx = new List<ushort>(60);
+            var white = new Vector3(1f, 1f, 1f);
+            foreach ((int fa, int fb, int fc) in faces)
+            {
+                Vector3 a = raw[fa].Normalize() * 0.5f;
+                Vector3 b = raw[fb].Normalize() * 0.5f;
+                Vector3 c = raw[fc].Normalize() * 0.5f;
+                Vector3 n = Vector3.Cross(b - a, c - a).Normalize();
+                var i = (ushort)v.Count;
+                v.Add(new Vertex(a, n, white));
+                v.Add(new Vertex(b, n, white));
+                v.Add(new Vertex(c, n, white));
+                idx.Add(i); idx.Add((ushort)(i + 1)); idx.Add((ushort)(i + 2));
+            }
+
+            return new Mesh(v.ToArray(), idx.ToArray());
+        }
+
+        /// <summary>
+        /// A weapon bolt: a long, thin octahedral shard of light, nose at −Z, with an HDR-hot core that the
+        /// bloom pass streaks into a beam. Authored 1 unit long and very slender, so uniform instance scale
+        /// sets the bolt's length; the per-instance tint colours the light (its vertex colours are
+        /// intensity, &gt; 1 on purpose). Oriented per instance to fly along its velocity.
+        /// </summary>
+        public static Mesh Bolt()
+        {
+            var v = new List<Vertex>(24);
+            var idx = new List<ushort>(24);
+
+            // Intensity gradient: blinding at the head, cooling toward the tail tip.
+            var head = new Vector3(3.2f, 3.2f, 3.0f);
+            var tail = new Vector3(0.9f, 0.8f, 0.7f);
+
+            var nose = new Vector3(0, 0, -0.5f);
+            var aft = new Vector3(0, 0, 0.5f);
+            const float w = 0.035f;      // half-width: a needle, not a rod
+            const float waistZ = -0.25f; // widest near the head, like a droplet of light
+            var ring = new[]
+            {
+                new Vector3(w, 0, waistZ), new Vector3(0, w, waistZ),
+                new Vector3(-w, 0, waistZ), new Vector3(0, -w, waistZ),
+            };
+
+            void Tri(Vector3 a, Vector3 b, Vector3 c, Vector3 colA, Vector3 colB, Vector3 colC)
+            {
+                Vector3 n = Vector3.Cross(b - a, c - a).Normalize();
+                var i = (ushort)v.Count;
+                v.Add(new Vertex(a, n, colA));
+                v.Add(new Vertex(b, n, colB));
+                v.Add(new Vertex(c, n, colC));
+                idx.Add(i); idx.Add((ushort)(i + 1)); idx.Add((ushort)(i + 2));
+            }
+
+            for (int k = 0; k < 4; k++)
+            {
+                Vector3 a = ring[k], b = ring[(k + 1) % 4];
+                Tri(nose, a, b, head, head, head);     // head facets: white-hot
+                Tri(aft, b, a, tail, head, head);      // tail facets: fading to the tip
+            }
+
+            return new Mesh(v.ToArray(), idx.ToArray());
+        }
+
         /// <summary>A unit cube (±0.5), per-face normals and colours. Kept for debris and as a fallback.</summary>
         public static Mesh Cube()
         {

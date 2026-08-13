@@ -503,6 +503,16 @@ namespace RP.Game.Graphics.Vulkan
                 _vk.CmdBindIndexBuffer(cb, _shipIndexBuffer, 0, IndexType.Uint16);
                 _vk.CmdDrawIndexed(cb, _shipIndexCount, _shipVisible, 0, 0, 0);
             }
+
+            // Prop batches (rocks, wrecks): more caller-supplied meshes, same pipeline.
+            for (int s = 0; s < PropSlots; s++)
+            {
+                if (_propVisible[s] == 0) continue;
+                var propBuffers = stackalloc Buffer[2] { _propVertexBuffers[s], _propInstanceBuffers[s][_currentFrame] };
+                _vk.CmdBindVertexBuffers(cb, 0, 2, propBuffers, offsets);
+                _vk.CmdBindIndexBuffer(cb, _propIndexBuffers[s], 0, IndexType.Uint16);
+                _vk.CmdDrawIndexed(cb, _propIndexCounts[s], _propVisible[s], 0, 0, 0);
+            }
         }
 
         private void DestroyGraphicsPipeline()
