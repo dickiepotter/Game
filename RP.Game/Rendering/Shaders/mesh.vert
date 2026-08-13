@@ -6,6 +6,8 @@
 layout(push_constant) uniform Push {
     mat4 viewProj;  // camera world -> clip (Vulkan-corrected)
     vec4 camPos;    // xyz = camera position in render space
+    vec4 sunDir;    // xyz = unit direction toward the sun (used by the fragment stage)
+    vec4 sunColor;  // rgb = the sun's light colour
 } pc;
 
 // Per-vertex (binding 0)

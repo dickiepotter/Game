@@ -5,9 +5,11 @@
 // direction reconstructed from the camera basis in the push constant. Output is linear; the _SRGB swapchain
 // encodes it.
 layout(push_constant) uniform Sky {
-    vec4 right;   // xyz = camera right (render space), w = aspect ratio
-    vec4 up;      // xyz = camera up,                  w = tan(fov/2)
-    vec4 forward; // xyz = camera forward
+    vec4 right;    // xyz = camera right (render space), w = aspect ratio
+    vec4 up;       // xyz = camera up,                  w = tan(fov/2)
+    vec4 forward;  // xyz = camera forward
+    vec4 sunDir;   // xyz = unit direction toward the sun (matches the mesh key light)
+    vec4 sunColor; // rgb = the sun's light colour
 } sky;
 
 layout(location = 0) in vec2 vUV;
@@ -81,6 +83,17 @@ void main()
     s += starLayer(dir, 750.0, 0.995);
     s += starLayer(dir, 1600.0, 0.997);
     col += vec3(0.85, 0.92, 1.0) * s * 3.0;
+
+    // The sun: a blinding HDR disc exactly along the light direction the meshes are lit from, with a
+    // tight inner corona and a wide soft halo. The bloom pass streaks the disc; the halo carries the
+    // glare the rest of the way. Nebula haze also brightens toward the sun (forward scattering).
+    vec3 toSun = normalize(sky.sunDir.xyz);
+    float sd = dot(dir, toSun);
+    float disc = smoothstep(0.99988, 0.99996, sd);            // ~0.5 deg core
+    float corona = pow(max(sd, 0.0), 2200.0);                 // hot rim hugging the disc
+    float halo = pow(max(sd, 0.0), 40.0);                     // broad glare
+    col += sky.sunColor.rgb * (disc * 60.0 + corona * 6.0 + halo * 0.5);
+    col += neb * cloud * halo * 0.8;                          // lit haze near the star
 
     outColor = vec4(col, 1.0);
 }

@@ -56,6 +56,96 @@ namespace RP.Game.Physics
         }
 
         /// <summary>
+        /// Tests a sphere against an axis-aligned box. On contact, <paramref name="normal"/> is the unit
+        /// direction pushing the sphere <b>out</b> of the box and <paramref name="penetration"/> the depth
+        /// to move along it to separate. Handles all three regimes correctly: sphere outside grazing a
+        /// face/edge/corner (clamped-point test), and sphere centre fully <i>inside</i> the box — where the
+        /// clamped point degenerates onto the centre itself and naive implementations report "no contact" —
+        /// by exiting through the nearest face. Axis-aligned by design: for an oriented box, transform the
+        /// sphere centre into the box's local frame first (one rotation) rather than rotating eight corners.
+        /// </summary>
+        public static bool SphereVsAabb(
+            Vector3d centre, double radius, Vector3d boxLo, Vector3d boxHi,
+            out Vector3d normal, out double penetration)
+        {
+            var clamped = new Vector3d(
+                Math.Clamp(centre.X, boxLo.X, boxHi.X),
+                Math.Clamp(centre.Y, boxLo.Y, boxHi.Y),
+                Math.Clamp(centre.Z, boxLo.Z, boxHi.Z));
+            Vector3d delta = centre - clamped;
+            double distSq = delta.MagnitudeSquared;
+
+            if (distSq >= radius * radius)
+            {
+                normal = default;
+                penetration = 0;
+                return false;
+            }
+
+            if (distSq < 1e-12)
+            {
+                // Centre inside the box: exit through the nearest face.
+                double dxLo = centre.X - boxLo.X, dxHi = boxHi.X - centre.X;
+                double dyLo = centre.Y - boxLo.Y, dyHi = boxHi.Y - centre.Y;
+                double dzLo = centre.Z - boxLo.Z, dzHi = boxHi.Z - centre.Z;
+                double min = Math.Min(Math.Min(Math.Min(dxLo, dxHi), Math.Min(dyLo, dyHi)), Math.Min(dzLo, dzHi));
+                normal =
+                    min == dxLo ? new Vector3d(-1, 0, 0) :
+                    min == dxHi ? new Vector3d(1, 0, 0) :
+                    min == dyLo ? new Vector3d(0, -1, 0) :
+                    min == dyHi ? new Vector3d(0, 1, 0) :
+                    min == dzLo ? new Vector3d(0, 0, -1) : new Vector3d(0, 0, 1);
+                penetration = min + radius;
+                return true;
+            }
+
+            double dist = Math.Sqrt(distSq);
+            normal = delta / dist;
+            penetration = radius - dist;
+            return true;
+        }
+
+        /// <summary>
+        /// Swept segment-vs-sphere test — the tunnelling-proof hit test for anything fast and small
+        /// (projectiles, raycast probes). True when segment [<paramref name="a"/>, <paramref name="b"/>]
+        /// passes within <paramref name="radius"/> of <paramref name="centre"/>. Outputs both the
+        /// closest-approach parameter <paramref name="t"/> in [0, 1] (for ordering multiple candidate hits
+        /// along a trajectory) and <paramref name="entryPoint"/> — where the segment <b>first pierces</b>
+        /// the sphere surface, which is where an impact visually belongs. A dead-centre shot still reports
+        /// its entry on the surface, not the centre; a segment starting inside the sphere reports the
+        /// surface point radially outward from its start.
+        /// </summary>
+        public static bool SegmentIntersectsSphere(
+            Vector3d a, Vector3d b, Vector3d centre, double radius, out double t, out Vector3d entryPoint)
+        {
+            Vector3d d = b - a;
+            double len2 = d.MagnitudeSquared;
+            if (len2 < 1e-18)
+            {
+                t = 0;
+                entryPoint = a;
+                return (a - centre).Magnitude <= radius;
+            }
+
+            t = Math.Clamp((centre - a).DotProduct(d) / len2, 0, 1);
+            Vector3d closest = a + d * t;
+            double missSq = (closest - centre).MagnitudeSquared;
+            if (missSq > radius * radius)
+            {
+                entryPoint = closest;
+                return false;
+            }
+
+            // Back up from the closest approach to the first surface crossing.
+            double back = Math.Sqrt(Math.Max(0, radius * radius - missSq)) / Math.Sqrt(len2);
+            Vector3d entry = a + d * Math.Max(0, t - back);
+            Vector3d radial = entry - centre;
+            double radialMag = radial.Magnitude;
+            entryPoint = radialMag > 1e-12 ? centre + radial / radialMag * radius : entry;
+            return true;
+        }
+
+        /// <summary>
         /// The kinetic energy of an impact (joules-ish): <c>½·reducedMass·closingSpeed²</c>, using the full
         /// relative speed between the two bodies (build brief S7/S16).
         /// </summary>

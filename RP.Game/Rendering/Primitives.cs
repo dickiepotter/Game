@@ -239,6 +239,94 @@ namespace RP.Game.Rendering
         }
 
         /// <summary>
+        /// A distant world: a twice-subdivided icosphere (radius 0.5) painted with seeded latitudinal
+        /// climate bands — polar ice, temperate belts, an equatorial band — with noise-wobbled boundaries
+        /// so it reads as weather, not stripes. Colours stay below 1 (a planet reflects, it doesn't emit);
+        /// the standard mesh lighting gives it a day side, a night side, and a blue fresnel rim that reads
+        /// as atmosphere for free. One instance at a few tens of kilometres anchors the whole sky.
+        /// </summary>
+        public static Mesh Planet(int seed = 1)
+        {
+            float t = (1f + (float)System.Math.Sqrt(5.0)) / 2f;
+            var raw = new[]
+            {
+                new Vector3(-1, t, 0), new Vector3(1, t, 0), new Vector3(-1, -t, 0), new Vector3(1, -t, 0),
+                new Vector3(0, -1, t), new Vector3(0, 1, t), new Vector3(0, -1, -t), new Vector3(0, 1, -t),
+                new Vector3(t, 0, -1), new Vector3(t, 0, 1), new Vector3(-t, 0, -1), new Vector3(-t, 0, 1),
+            };
+            var baseFaces = new[]
+            {
+                (0, 11, 5), (0, 5, 1), (0, 1, 7), (0, 7, 10), (0, 10, 11),
+                (1, 5, 9), (5, 11, 4), (11, 10, 2), (10, 7, 6), (7, 1, 8),
+                (3, 9, 4), (3, 4, 2), (3, 2, 6), (3, 6, 8), (3, 8, 9),
+                (4, 9, 5), (2, 4, 11), (6, 2, 10), (8, 6, 7), (9, 8, 1),
+            };
+
+            // Deterministic per-direction wobble, shared by co-located vertices (quantised input).
+            float Wobble(Vector3 unit, int salt)
+            {
+                int hx = (int)System.Math.Round(unit.X * 256f);
+                int hy = (int)System.Math.Round(unit.Y * 256f);
+                int hz = (int)System.Math.Round(unit.Z * 256f);
+                uint h = (uint)((seed + salt) * 374761393 + hx * 668265263 + hy * 2246822519 + hz * 3266489917);
+                h = (h ^ (h >> 15)) * 2246822519u;
+                h = (h ^ (h >> 13)) * 3266489917u;
+                return ((h ^ (h >> 16)) & 0xFFFF) / 65535f; // 0..1
+            }
+
+            // Seeded palette: ocean, two land belts, ice.
+            var ocean = new Vector3(0.10f + Wobble(new Vector3(1, 0, 0), 1) * 0.06f, 0.22f, 0.38f);
+            var lowland = new Vector3(0.24f, 0.30f + Wobble(new Vector3(0, 1, 0), 2) * 0.10f, 0.18f);
+            var highland = new Vector3(0.42f, 0.34f, 0.22f);
+            var ice = new Vector3(0.80f, 0.84f, 0.90f);
+
+            Vector3 ColourAt(Vector3 unit)
+            {
+                // Latitude with a wobbled boundary, plus a continents/ocean noise field.
+                float lat = System.MathF.Abs(unit.Y) + (Wobble(unit, 3) - 0.5f) * 0.18f;
+                if (lat > 0.82f) return ice;
+                float continents = Wobble(unit * 1.7f, 4);
+                if (continents < 0.55f) return ocean;
+                return continents < 0.8f ? lowland : highland;
+            }
+
+            var v = new List<Vertex>(960);
+            var idx = new List<ushort>(960);
+            void Tri(Vector3 a, Vector3 b, Vector3 c)
+            {
+                Vector3 pa = a.Normalize() * 0.5f, pb = b.Normalize() * 0.5f, pc = c.Normalize() * 0.5f;
+                // Smooth normals (the radial direction): a planet is round, not faceted.
+                Vector3 centreUnit = ((pa + pb + pc) * (1f / 3f)).Normalize();
+                Vector3 col = ColourAt(centreUnit);
+                var i = (ushort)v.Count;
+                v.Add(new Vertex(pa, pa.Normalize(), col));
+                v.Add(new Vertex(pb, pb.Normalize(), col));
+                v.Add(new Vertex(pc, pc.Normalize(), col));
+                idx.Add(i); idx.Add((ushort)(i + 1)); idx.Add((ushort)(i + 2));
+            }
+
+            foreach ((int fa, int fb, int fc) in baseFaces)
+            {
+                // Two midpoint subdivisions: 20 -> 80 -> 320 faces.
+                Vector3 a = raw[fa], b = raw[fb], c = raw[fc];
+                Vector3 ab = (a + b) * 0.5f, bc = (b + c) * 0.5f, ca = (c + a) * 0.5f;
+                foreach ((Vector3 p, Vector3 q, Vector3 r) in new[]
+                {
+                    (a, ab, ca), (ab, b, bc), (ca, bc, c), (ab, bc, ca),
+                })
+                {
+                    Vector3 pq = (p + q) * 0.5f, qr = (q + r) * 0.5f, rp = (r + p) * 0.5f;
+                    Tri(p, pq, rp);
+                    Tri(pq, q, qr);
+                    Tri(rp, qr, r);
+                    Tri(pq, qr, rp);
+                }
+            }
+
+            return new Mesh(v.ToArray(), idx.ToArray());
+        }
+
+        /// <summary>
         /// A glow orb for point FX (particles, dust, engine bloom, flares): an icosahedron of radius 0.5
         /// with pure-white vertices, so the per-instance tint IS the final colour and the HDR bloom turns
         /// each one into a soft point of light rather than a recognisable solid.

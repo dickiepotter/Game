@@ -74,7 +74,7 @@ namespace RP.Game.Graphics.Vulkan
         // Prop batches: additional caller-supplied meshes (asteroids/rocks, wreck hulls, station interiors,
         // weapon bolts, …) each drawn as their own instanced batch with the same pipeline. A slot with no
         // mesh set simply draws nothing, so the game can wire props up incrementally.
-        internal const int PropSlots = 4;
+        internal const int PropSlots = 8;
         private const int MaxPropsPerSlot = 768;
         private readonly Buffer[] _propVertexBuffers = new Buffer[PropSlots];
         private readonly DeviceMemory[] _propVertexMemories = new DeviceMemory[PropSlots];

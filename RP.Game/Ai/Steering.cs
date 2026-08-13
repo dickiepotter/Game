@@ -58,6 +58,77 @@ namespace RP.Game.Ai
         }
 
         /// <summary>
+        /// <b>Break turn</b> — the defensive manoeuvre against a shooter: steer hard <i>perpendicular</i>
+        /// to the threat's line of sight, so every shot needs a fresh lead solution. Straight away from a
+        /// gun is the worst move (zero angular rate for the shooter); across it is the best. The
+        /// perpendicular is chosen in the plane spanned by the threat line and the current velocity — the
+        /// turn that reuses the most existing speed — with <paramref name="phase"/> flipping which way
+        /// around, so alternating or per-ship phases produce jinks rather than one predictable arc.
+        /// </summary>
+        /// <param name="position">The evader's position.</param>
+        /// <param name="velocity">The evader's velocity.</param>
+        /// <param name="threat">The shooter's position.</param>
+        /// <param name="maxSpeed">The evader's speed budget.</param>
+        /// <param name="maxForce">Steering-force clamp.</param>
+        /// <param name="phase">Sign selector for the turn direction (e.g. +1/−1, or sin(time) sampled).</param>
+        public static Vector3d BreakTurn(Vector3d position, Vector3d velocity, Vector3d threat,
+            double maxSpeed, double maxForce, double phase = 1.0)
+        {
+            Vector3d line = (position - threat).NormalizeOrDefault();
+            if (line.IsZero()) return Vector3d.Origin;
+
+            // Perpendicular in the (line, velocity) plane; fall back to any perpendicular when flying
+            // straight down the threat line (where the plane degenerates).
+            Vector3d across = velocity - line * velocity.DotProduct(line);
+            if (across.MagnitudeSquared < 1e-6)
+            {
+                across = line.CrossProduct(new Vector3d(0.31, 0.95, 0.12));
+                if (across.IsZero()) across = line.CrossProduct(new Vector3d(1, 0, 0));
+            }
+
+            Vector3d desired = across.NormalizeOrDefault() * (phase >= 0 ? maxSpeed : -maxSpeed);
+            return (desired - velocity).ClampMagnitude(maxForce);
+        }
+
+        /// <summary>
+        /// <b>Extend</b> — disengage to reset the fight: steer away from the threat with a slight offset
+        /// off the pure flee line (a straight-line extension is a zero-deflection shot for a pursuer; a
+        /// few degrees off keeps their nose working). Use it when winded — shields down, hull low — then
+        /// re-engage once <paramref name="position"/> is far enough out.
+        /// </summary>
+        public static Vector3d Extend(Vector3d position, Vector3d velocity, Vector3d threat,
+            double maxSpeed, double maxForce)
+        {
+            Vector3d away = (position - threat).NormalizeOrDefault();
+            if (away.IsZero()) return Vector3d.Origin;
+
+            Vector3d skew = away.CrossProduct(new Vector3d(0.31, 0.95, 0.12)).NormalizeOrDefault() * 0.18;
+            Vector3d desired = (away + skew).NormalizeOrDefault() * maxSpeed;
+            return (desired - velocity).ClampMagnitude(maxForce);
+        }
+
+        /// <summary>
+        /// The local-frame offset of a formation slot in a <b>finger-four</b>-style stack: slot 0 is the
+        /// leader at the origin; wingmen fall in behind, alternating sides, stepped back and slightly
+        /// below — the arrangement real flights use because everyone can see the leader and nobody sits in
+        /// anyone's wash. Transform by the leader's orientation and add its position for the world-space
+        /// slot, then <see cref="Arrive"/> at it. Slots beyond 3 continue the echelon outward, so any
+        /// flight size works.
+        /// </summary>
+        /// <param name="slot">0 = leader, 1+ = wingmen.</param>
+        /// <param name="spacing">Lateral spacing between adjacent ships (metres) — a few hull lengths.</param>
+        public static Vector3d FormationSlotLocal(int slot, double spacing)
+        {
+            if (slot <= 0) return Vector3d.Origin;
+
+            int pair = (slot + 1) / 2;                 // 1,1,2,2,3,3…
+            double side = slot % 2 == 1 ? 1.0 : -1.0;  // starboard first, then port
+            // Echelon: out to the side, stepped back (+Z is aft in the engine's forward = −Z convention),
+            // and slightly low so the leader stays in everyone's canopy view.
+            return new Vector3d(side * pair * spacing, -0.15 * pair * spacing, 0.8 * pair * spacing);
+        }
+
+        /// <summary>
         /// <b>Separation</b> (the anti-collision rule of flocking): steer away from neighbours that are too
         /// close, weighted so the nearest push hardest. Keeps a pack of Wasps from piling into one point.
         /// </summary>

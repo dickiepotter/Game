@@ -5,7 +5,9 @@
 // tracers glow, and an ACES-ish tonemap + gamma so bright sources roll off toward white instead of clipping.
 layout(push_constant) uniform Push {
     mat4 viewProj;
-    vec4 camPos; // xyz = camera position in render space
+    vec4 camPos;   // xyz = camera position in render space
+    vec4 sunDir;   // xyz = unit direction toward the sun — the same star the sky pass draws
+    vec4 sunColor; // rgb = the sun's light colour
 } pc;
 
 layout(location = 0) in vec3 vColor;
@@ -19,14 +21,16 @@ void main()
     vec3 N = normalize(vNormal);
     vec3 V = normalize(pc.camPos.xyz - vWorldPos);
 
-    vec3 keyDir = normalize(vec3(0.5, 0.85, 0.45));
-    vec3 fillDir = normalize(vec3(-0.5, -0.25, -0.6));
+    // The key light IS the scene's sun (pushed by the renderer), so hull shading, specular glints and the
+    // sky's sun disc all agree on where the light comes from. The fill opposes it: space's "bounce".
+    vec3 keyDir = normalize(pc.sunDir.xyz);
+    vec3 fillDir = -keyDir;
 
     float key = max(dot(N, keyDir), 0.0);
     float fill = max(dot(N, fillDir), 0.0);
     float ambient = 0.08;
 
-    vec3 keyColor = vec3(1.0, 0.96, 0.88);   // warm sun
+    vec3 keyColor = pc.sunColor.rgb;
     vec3 fillColor = vec3(0.25, 0.40, 0.65); // cool bounce
 
     vec3 lit = vColor * (ambient + key * keyColor + fill * 0.25 * fillColor);

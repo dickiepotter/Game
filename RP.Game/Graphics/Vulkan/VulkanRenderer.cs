@@ -109,6 +109,18 @@ namespace RP.Game.Graphics.Vulkan
         /// in step with the swapchain automatically.</summary>
         public Camera Camera { get; } = new Camera();
 
+        /// <summary>
+        /// Unit direction <b>toward</b> the scene's star, in render space. It drives everything lit: the
+        /// key light on every mesh, the specular glint, and the sun disc + corona the sky pass draws in
+        /// exactly this direction — one property keeps the whole frame's lighting story consistent. Games
+        /// with no visible star can leave the default (a pleasant three-quarter key).
+        /// </summary>
+        public Vector3 SunDirection { get; set; } = new Vector3(0.5f, 0.85f, 0.45f).Normalize();
+
+        /// <summary>The star's colour (linear). Warm white by default; redden it for a dying-sun system,
+        /// cool it for a blue giant — meshes and backdrop follow together.</summary>
+        public Vector3 SunColor { get; set; } = new(1.0f, 0.96f, 0.88f);
+
         /// <summary>The model transform applied to the test cube (world placement/orientation). Game code
         /// sets this each frame to move or spin the cube.</summary>
         public Matrix ModelTransform { get; set; } = Matrix.Identity;

@@ -84,11 +84,27 @@ namespace RP.Game.Audio
         }
 
         /// <summary>
-        /// Plays a one-shot 16-bit mono PCM clip at a world position, with optional pitch. Finished voices are
-        /// recycled so a sustained firefight never exhausts OpenAL's sources; once <see cref="MaxOneShots"/>
-        /// are live and none are free, the quietest-to-spare new sound is simply dropped.
+        /// Sets the doppler strength. OpenAL computes the shift from listener and source velocities (fed
+        /// via <see cref="SetListener"/> and the <c>velocity</c> parameter of <see cref="PlayAt"/>) against
+        /// a nominal speed of sound of 343 m/s. Sci-fi craft move at aircraft-carrier-to-artillery speeds,
+        /// where a physically-true factor of 1 shifts a fly-by into cartoon territory — a factor of
+        /// 0.2–0.4 keeps the cue ("that passed me, fast") without the comedy. 0 disables doppler entirely.
         /// </summary>
-        public void PlayAt(short[] pcm, int sampleRate, Vector3 position, float gain = 1f, float pitch = 1f)
+        public void SetDopplerFactor(float factor)
+        {
+            if (_disposed) return;
+            _al.DopplerFactor(factor < 0 ? 0 : factor);
+        }
+
+        /// <summary>
+        /// Plays a one-shot 16-bit mono PCM clip at a world position, with optional pitch, and — when
+        /// <paramref name="velocity"/> is supplied — a source velocity so OpenAL applies a doppler shift
+        /// against the listener (see <see cref="SetDopplerFactor"/>). Finished voices are recycled so a
+        /// sustained firefight never exhausts OpenAL's sources; once <see cref="MaxOneShots"/> are live and
+        /// none are free, the new sound is simply dropped.
+        /// </summary>
+        public void PlayAt(short[] pcm, int sampleRate, Vector3 position, float gain = 1f, float pitch = 1f,
+            Vector3 velocity = default)
         {
             if (_disposed) return;
 
@@ -117,6 +133,7 @@ namespace RP.Game.Audio
             _al.BufferData(buffer, BufferFormat.Mono16, pcm, sampleRate);
             _al.SetSourceProperty(source, SourceInteger.Buffer, (int)buffer);
             _al.SetSourceProperty(source, SourceVector3.Position, position.X, position.Y, position.Z);
+            _al.SetSourceProperty(source, SourceVector3.Velocity, velocity.X, velocity.Y, velocity.Z);
             _al.SetSourceProperty(source, SourceFloat.Gain, gain);
             _al.SetSourceProperty(source, SourceFloat.Pitch, pitch <= 0 ? 1f : pitch);
             _al.SetSourceProperty(source, SourceBoolean.Looping, false);
