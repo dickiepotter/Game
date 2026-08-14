@@ -3,8 +3,9 @@
   <PropertyGroup>
     <!-- The engine targets a single modern runtime. Unlike RP.Math (which also targets
          netstandard2.0 so it can be consumed anywhere), Game depends on Silk.NET/Vulkan and
-         is only ever the foundation of a desktop game, so one current TFM keeps things simple. -->
-    <TargetFramework>net8.0</TargetFramework>
+         is only ever the foundation of a desktop game, so one current TFM keeps things simple.
+         net9.0 follows RP.Game.Core, which follows RP.Sound. -->
+    <TargetFramework>net9.0</TargetFramework>
 
     <!-- Mirror RP.Math's convention exactly so the two libraries read as siblings:
          a single root namespace equal to the assembly name, with area sub-namespaces beneath it
@@ -30,8 +31,16 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Dependency direction is strictly upward: Game depends on Math, never the reverse. -->
-    <ProjectReference Include="..\..\Math\RP.Math\RP.Math.csproj" />
+    <!-- Dependency direction is strictly upward: Game depends on Core, Core on Math and Sound,
+         never the reverse.
+
+         This project holds only what genuinely needs Silk.NET — the Vulkan backend, the OpenAL
+         audio engine, the windowing platform layer and the one camera that reads a keyboard.
+         Everything else lives in RP.Game.Core, which a consumer can reference without inheriting
+         Vulkan, OpenAL and a shader-compilation build step. That is not a tidiness exercise: a 2D
+         WPF application wanting FixedTimestepAccumulator and JsonStore should not have to ship
+         fifty megabytes of native graphics libraries to get them. -->
+    <ProjectReference Include="..\RP.Game.Core\RP.Game.Core.csproj" />
   </ItemGroup>
 
   <ItemGroup>

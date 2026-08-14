@@ -6,16 +6,35 @@ one root namespace equal to the assembly name (`RP.Game`), with area sub-namespa
 same "the code teaches" ethos — every non-obvious concept is explained where it first appears.
 
 ```
-RP.Math      pure mathematics, no dependencies
-   ▲
-RP.Game      engine + mechanics valid for ANY game   ← you are here
-   ▲
-RP.Spectre   one specific game
+RP.Math  ─┐   pure mathematics, no dependencies
+          ├─► RP.Game.Core   engine + mechanics, no platform  ← most of the library
+RP.Sound ─┘        ▲
+                   │
+              RP.Game        Vulkan · OpenAL · windowing
+                   ▲
+              RP.Spectre     one specific game
 ```
 
 **The boundary rule:** nothing in `RP.Game` may know about any particular game. If a type would need
 renaming or gutting to drop into a completely different game, it belongs in the game, not here. The acid
 test: it must make sense in a game that has nothing to do with space, ships, or wrecks.
+
+**The second boundary — Core versus platform.** The library ships as two assemblies. `RP.Game.Core`
+holds everything that is pure computation: the fixed-timestep loop, logging, mechanics, physics,
+scene management, the rendering *data* types and the steering behaviours. `RP.Game` holds the ten
+files that genuinely need a platform underneath them — the Vulkan backend, the OpenAL audio engine,
+the windowing layer, and the one camera that reads a keyboard.
+
+The cut is worth the extra project because the two halves have wildly different costs. Core is
+36 files that reference nothing but `RP.Math` and `RP.Sound`; `RP.Game` drags in seven Silk.NET
+packages, native graphics and audio libraries, and a shader-compilation build step that wants the
+Vulkan SDK installed. A 2D WPF application that wants `FixedTimestepAccumulator` and `JsonStore`
+should not have to ship any of that to get them — and now it does not.
+
+Two details make the split cheap rather than disruptive. **No namespace moved**: the types in
+`RP.Game.Core.dll` are still `RP.Game.Core`, `RP.Game.Rendering`, `RP.Game.Physics` and so on, so
+not one consumer `using` had to change. And **every existing test already covered Core** — not one
+of them touched Silk.NET — which is what showed the seam was in the right place before it was cut.
 
 ## Areas (filled in as the build proceeds)
 

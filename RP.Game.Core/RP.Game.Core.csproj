@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- net9.0 rather than net8.0 because Core depends on RP.Sound, which targets net9.0.
+         RP.Math stays multi-targeted at net8.0;netstandard2.0 — it is the published package and
+         wants the broadest reach — and a net9.0 consumer references it happily. -->
+    <TargetFramework>net9.0</TargetFramework>
+
+    <!-- The namespaces here are unchanged from when these files lived in RP.Game: RP.Game.Core,
+         RP.Game.Rendering, RP.Game.Physics and so on. Splitting the assembly deliberately did not
+         move a single type, so no consumer had to touch a using directive. That is what made the
+         split safe to do in one commit. -->
+    <AssemblyName>RP.Game.Core</AssemblyName>
+    <RootNamespace>RP.Game</RootNamespace>
+
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591;CS1573</NoWarn>
+
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+
+    <!-- Deliberately absent: AllowUnsafeBlocks. Nothing in Core needs a pointer, and leaving the
+         switch off is what keeps it that way. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Dependency direction is strictly upward, and Core sits directly on the two leaf libraries.
+         Both are checked out as siblings of this repository (or as siblings under a consumer's
+         extern/ directory, which is the same shape). -->
+    <ProjectReference Include="..\..\Math\RP.Math\RP.Math.csproj" />
+    <ProjectReference Include="..\..\Sound\RP.Sound\RP.Sound.csproj" />
+  </ItemGroup>
+
+</Project>
