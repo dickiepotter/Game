@@ -7,34 +7,41 @@ same "the code teaches" ethos — every non-obvious concept is explained where i
 
 ```
 RP.Math  ─┐   pure mathematics, no dependencies
-          ├─► RP.Game.Core   engine + mechanics, no platform  ← most of the library
+          ├─► RP.Game        engine + mechanics, no platform   ← you are here
 RP.Sound ─┘        ▲
                    │
-              RP.Game        Vulkan · OpenAL · windowing
+              RP.Game.Silk   + Silk.NET: Vulkan · OpenAL · windowing
                    ▲
               RP.Spectre     one specific game
 ```
+
+**The naming convention:** the base package *is* the engine, and every satellite is named for the
+dependency it brings with it — `RP.Game.Silk` is `RP.Game` plus Silk.NET. A future OpenGL or
+headless-server backend would be `RP.Game.<whatever it needs>` on the same pattern. The name tells
+a consumer what they are taking on, and `RP.Game` on its own always means the part that costs
+nothing.
 
 **The boundary rule:** nothing in `RP.Game` may know about any particular game. If a type would need
 renaming or gutting to drop into a completely different game, it belongs in the game, not here. The acid
 test: it must make sense in a game that has nothing to do with space, ships, or wrecks.
 
-**The second boundary — Core versus platform.** The library ships as two assemblies. `RP.Game.Core`
+**The second boundary — engine versus platform.** The library ships as two assemblies. `RP.Game`
 holds everything that is pure computation: the fixed-timestep loop, logging, mechanics, physics,
-scene management, the rendering *data* types and the steering behaviours. `RP.Game` holds the ten
-files that genuinely need a platform underneath them — the Vulkan backend, the OpenAL audio engine,
-the windowing layer, and the one camera that reads a keyboard.
+scene management, the rendering *data* types and the steering behaviours. `RP.Game.Silk` holds the
+ten files that genuinely need a platform underneath them — the Vulkan backend, the OpenAL audio
+engine, the windowing layer, and the one camera that reads a keyboard.
 
-The cut is worth the extra project because the two halves have wildly different costs. Core is
-36 files that reference nothing but `RP.Math` and `RP.Sound`; `RP.Game` drags in seven Silk.NET
-packages, native graphics and audio libraries, and a shader-compilation build step that wants the
-Vulkan SDK installed. A 2D WPF application that wants `FixedTimestepAccumulator` and `JsonStore`
-should not have to ship any of that to get them — and now it does not.
+The cut is worth the extra project because the two halves have wildly different costs. `RP.Game` is
+36 files that reference nothing but `RP.Math` and `RP.Sound`; `RP.Game.Silk` drags in seven
+Silk.NET packages, native graphics and audio libraries, and a shader-compilation build step that
+wants the Vulkan SDK installed. A 2D WPF application that wants `FixedTimestepAccumulator` and
+`JsonStore` should not have to ship any of that to get them — and now it does not.
 
 Two details make the split cheap rather than disruptive. **No namespace moved**: the types in
-`RP.Game.Core.dll` are still `RP.Game.Core`, `RP.Game.Rendering`, `RP.Game.Physics` and so on, so
-not one consumer `using` had to change. And **every existing test already covered Core** — not one
-of them touched Silk.NET — which is what showed the seam was in the right place before it was cut.
+`RP.Game.Silk.dll` are still `RP.Game.Graphics.Vulkan`, `RP.Game.Platform` and `RP.Game.Audio`, so
+not one consumer `using` had to change. And **every existing test already covered the engine half**
+— not one of them touched Silk.NET — which is what showed the seam was in the right place before it
+was cut.
 
 ## Areas (filled in as the build proceeds)
 

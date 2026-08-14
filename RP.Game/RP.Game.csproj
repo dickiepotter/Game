@@ -1,10 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <!-- The engine targets a single modern runtime. Unlike RP.Math (which also targets
-         netstandard2.0 so it can be consumed anywhere), Game depends on Silk.NET/Vulkan and
-         is only ever the foundation of a desktop game, so one current TFM keeps things simple.
-         net9.0 follows RP.Game.Core, which follows RP.Sound. -->
+    <!-- net9.0 rather than net8.0 because the engine depends on RP.Sound, which targets net9.0.
+         RP.Math stays multi-targeted at net8.0;netstandard2.0 — it is the published package and
+         wants the broadest reach — and a net9.0 consumer references it happily. -->
     <TargetFramework>net9.0</TargetFramework>
 
     <!-- Mirror RP.Math's convention exactly so the two libraries read as siblings:
@@ -24,103 +23,17 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
 
-    <!-- Vulkan is a C API: creating objects means filling structs and passing pointers to them. Silk.NET
-         surfaces that faithfully, so the backend uses `unsafe` blocks (stack-allocated structs, pinned
-         strings, pointer fields). This is confined to RP.Game.Graphics.Vulkan; nothing above it is unsafe. -->
-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Deliberately absent: AllowUnsafeBlocks. Nothing in the engine proper needs a pointer, and
+         leaving the switch off is what keeps it that way. Pointers live in RP.Game.Silk, where
+         Vulkan's C API forces them. -->
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Dependency direction is strictly upward: Game depends on Core, Core on Math and Sound,
-         never the reverse.
-
-         This project holds only what genuinely needs Silk.NET — the Vulkan backend, the OpenAL
-         audio engine, the windowing platform layer and the one camera that reads a keyboard.
-         Everything else lives in RP.Game.Core, which a consumer can reference without inheriting
-         Vulkan, OpenAL and a shader-compilation build step. That is not a tidiness exercise: a 2D
-         WPF application wanting FixedTimestepAccumulator and JsonStore should not have to ship
-         fifty megabytes of native graphics libraries to get them. -->
-    <ProjectReference Include="..\RP.Game.Core\RP.Game.Core.csproj" />
+    <!-- Dependency direction is strictly upward: Game depends on Math and Sound, never the reverse.
+         Both are checked out as siblings of this repository (or as siblings under a consumer's
+         extern/ directory, which is the same shape). -->
+    <ProjectReference Include="..\..\Math\RP.Math\RP.Math.csproj" />
+    <ProjectReference Include="..\..\Sound\RP.Sound\RP.Sound.csproj" />
   </ItemGroup>
-
-  <ItemGroup>
-    <PackageReference Include="Silk.NET.Input" Version="2.23.0" />
-    <PackageReference Include="Silk.NET.OpenAL" Version="2.23.0" />
-    <PackageReference Include="Silk.NET.OpenAL.Soft.Native" Version="1.23.1" />
-    <PackageReference Include="Silk.NET.Vulkan" Version="2.23.0" />
-    <PackageReference Include="Silk.NET.Vulkan.Extensions.EXT" Version="2.23.0" />
-    <PackageReference Include="Silk.NET.Vulkan.Extensions.KHR" Version="2.23.0" />
-    <PackageReference Include="Silk.NET.Windowing" Version="2.23.0" />
-  </ItemGroup>
-
-  <!-- Shader sources authored in GLSL; compiled offline to SPIR-V by the Vulkan SDK's glslc and then
-       *embedded* into RP.Game.dll, so the bytecode travels with the assembly (no loose files to copy to
-       each consumer's output). Build brief S4.2: shaders compile to SPIR-V as a build step. -->
-  <ItemGroup>
-    <ShaderSource Include="Rendering/Shaders/**/*.vert;Rendering/Shaders/**/*.frag;Rendering/Shaders/**/*.comp" />
-    <!-- Surface the .glsl sources in the IDE without compiling them as anything else. -->
-    <None Include="@(ShaderSource)" />
-  </ItemGroup>
-
-  <PropertyGroup>
-    <!-- Locate glslc: prefer the VULKAN_SDK env var, which the SDK installer exports. It is absent in
-         shells opened before the install, so fall back to scanning the default install root and taking
-         the highest version present (LocateVulkanSdk below) rather than pinning one version number, as
-         a pinned path silently stops matching the moment the SDK is upgraded. -->
-    <VulkanSdkDir Condition="'$(VULKAN_SDK)' != ''">$(VULKAN_SDK)</VulkanSdkDir>
-    <VulkanSdkRoot Condition="'$(VulkanSdkRoot)' == ''">C:\VulkanSDK</VulkanSdkRoot>
-    <Glslc Condition="'$(VulkanSdkDir)' != ''">$(VulkanSdkDir)\Bin\glslc.exe</Glslc>
-
-    <!-- Target the SPIR-V dialect of Vulkan 1.2, not 1.3. A 1.3 target emits SPIR-V 1.6, which drivers
-         that top out at Vulkan 1.2 reject outright (vkCreateShaderModule fails) even though the renderer
-         itself runs there happily via VK_KHR_dynamic_rendering, which is an API-side feature and asks
-         nothing of the bytecode. Every shader here is plain "#version 450" with no
-         extensions, so 1.2 costs us nothing and the SPIR-V loads on both driver generations. Raise this
-         only when a shader genuinely needs newer semantics, and expect to drop pre-1.3 devices if so. -->
-    <ShaderTargetEnv Condition="'$(ShaderTargetEnv)' == ''">vulkan1.2</ShaderTargetEnv>
-
-    <!-- The compiled SPIR-V lives here in the source tree, and is committed. That is load-bearing:
-         it lets contributors without the Vulkan SDK build the solution, since CompileShaders is skipped
-         while the .spv are newer than the .vert/.frag. Written literally rather than through
-         $(IntermediateOutputPath), which is empty this early (the SDK defines it in its .targets, which
-         import after this body) and so silently resolved to exactly this path anyway. -->
-    <SpirvDir>shaders\</SpirvDir>
-  </PropertyGroup>
-
-  <!-- VULKAN_SDK was not set, so look for an installed SDK. Directory names sort as versions here
-       (1.4.350.0, 1.4.357.0), so the last entry is the newest. Done in a target because the scan needs
-       the filesystem, and skipped entirely when the env var already answered the question. -->
-  <Target Name="LocateVulkanSdk" BeforeTargets="CompileShaders" Condition="'$(Glslc)' == ''">
-    <ItemGroup>
-      <VulkanSdkCandidate Include="$([System.IO.Directory]::GetDirectories('$(VulkanSdkRoot)'))" Condition="Exists('$(VulkanSdkRoot)')" />
-    </ItemGroup>
-    <!-- Batching over the item assigns each in turn, leaving the last (highest version) in place. -->
-    <PropertyGroup>
-      <VulkanSdkDir Condition="Exists('%(VulkanSdkCandidate.Identity)\Bin\glslc.exe')">%(VulkanSdkCandidate.Identity)</VulkanSdkDir>
-      <Glslc Condition="'$(VulkanSdkDir)' != ''">$(VulkanSdkDir)\Bin\glslc.exe</Glslc>
-    </PropertyGroup>
-  </Target>
-
-  <!-- Compile GLSL -> SPIR-V. Incremental (Inputs/Outputs): only recompiles changed shaders. This file
-       counts as an input too, so editing ShaderTargetEnv rebuilds the bytecode instead of leaving SPIR-V
-       compiled for the previous target sitting there looking current. -->
-  <Target Name="CompileShaders" DependsOnTargets="LocateVulkanSdk" BeforeTargets="AssignTargetPaths" Inputs="@(ShaderSource);$(MSBuildProjectFullPath)" Outputs="@(ShaderSource->'$(SpirvDir)%(Filename)%(Extension).spv')">
-    <Error Condition="'$(Glslc)' == '' or !Exists('$(Glslc)')" Text="glslc not found (looked at VULKAN_SDK, then '$(VulkanSdkRoot)'). Install the Vulkan SDK, or set VULKAN_SDK to its root." />
-    <MakeDir Directories="$(SpirvDir)" />
-    <Exec Command="&quot;$(Glslc)&quot; --target-env=$(ShaderTargetEnv) &quot;%(ShaderSource.FullPath)&quot; -o &quot;$(SpirvDir)%(ShaderSource.Filename)%(ShaderSource.Extension).spv&quot;" />
-  </Target>
-
-  <!-- Embed the compiled SPIR-V into the assembly. Runs *every* build (no Inputs/Outputs) and before
-       AssignTargetPaths, so the manifest-name pass always sees the resources even when CompileShaders
-       was skipped as up-to-date. LogicalName is what the renderer loads by (e.g. "triangle.vert.spv"). -->
-  <Target Name="EmbedShaders" BeforeTargets="AssignTargetPaths" DependsOnTargets="CompileShaders">
-    <ItemGroup>
-      <!-- Batch over ShaderSource so both the path and the LogicalName derive from the *source* metadata
-           (Filename="triangle", Extension=".vert"), giving deterministic names like "triangle.vert.spv". -->
-      <EmbeddedResource Include="$(SpirvDir)%(ShaderSource.Filename)%(ShaderSource.Extension).spv">
-        <LogicalName>%(ShaderSource.Filename)%(ShaderSource.Extension).spv</LogicalName>
-      </EmbeddedResource>
-    </ItemGroup>
-  </Target>
 
 </Project>

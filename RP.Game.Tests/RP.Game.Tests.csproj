@@ -24,12 +24,12 @@
     </PackageReference>
   </ItemGroup>
 
-  <!-- One test project covers both halves of the split. Core is named explicitly even though it
-       would arrive transitively, because every test in here exercises a Core type: not one of them
-       touches Silk.NET, Vulkan or OpenAL, which is precisely why the seam was safe to cut. -->
+  <!-- One test project covers both halves of the split. RP.Game is named explicitly even though it
+       would arrive transitively, because every test in here exercises an engine type: not one of
+       them touches Silk.NET, Vulkan or OpenAL, which is precisely why the seam was safe to cut. -->
   <ItemGroup>
-    <ProjectReference Include="..\RP.Game.Core\RP.Game.Core.csproj" />
     <ProjectReference Include="..\RP.Game\RP.Game.csproj" />
+    <ProjectReference Include="..\RP.Game.Silk\RP.Game.Silk.csproj" />
   </ItemGroup>
 
 </Project>
