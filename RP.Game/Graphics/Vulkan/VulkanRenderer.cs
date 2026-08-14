@@ -121,6 +121,38 @@ namespace RP.Game.Graphics.Vulkan
         /// cool it for a blue giant — meshes and backdrop follow together.</summary>
         public Vector3 SunColor { get; set; } = new(1.0f, 0.96f, 0.88f);
 
+        // --- The backdrop planet -------------------------------------------------------------------
+        // Rendered the way space games actually draw distant worlds: not as a mesh (whose facets betray
+        // themselves the moment it fills real sky) but as a per-pixel ray-traced sphere impostor in the
+        // sky pass — an analytically perfect silhouette at any resolution, with a per-pixel terminator,
+        // procedural continents/clouds, and rim-scattering "atmosphere" (the standard fresnel
+        // approximation of Rayleigh scattering) plus a thin off-limb halo. Because it is shaded from the
+        // view ray, it costs the same at any distance and never LODs, pops or facets.
+
+        /// <summary>World-space centre of the backdrop planet. It is drawn behind everything (no depth),
+        /// so keep it far outside the play space; any distance works — the shading is analytic.</summary>
+        public Vector3d PlanetPosition { get; set; }
+
+        /// <summary>Planet radius in metres. Zero or negative disables the planet entirely.</summary>
+        public double PlanetRadius { get; set; }
+
+        /// <summary>The planet's rotation axis (drives surface spin and the polar-cap latitude).</summary>
+        public Vector3 PlanetSpinAxis { get; set; } = new Vector3(0.15f, 1f, 0.05f).Normalize();
+
+        /// <summary>Current rotation angle about <see cref="PlanetSpinAxis"/> (radians). Advance it a few
+        /// millirad per second for an imperceptible-but-alive drift of the surface and clouds.</summary>
+        public double PlanetSpinAngle { get; set; }
+
+        /// <summary>Selects the continent layout — same seed, same world.</summary>
+        public float PlanetSeed { get; set; } = 1f;
+
+        /// <summary>Sea level in the continent noise field (0 = all land … 1 = water world). ~0.55 gives
+        /// an Earth-like ocean/land split.</summary>
+        public float PlanetOceanLevel { get; set; } = 0.55f;
+
+        /// <summary>Polar ice extent (0 = none, ~0.12 Earth-like, larger values glaciate the world).</summary>
+        public float PlanetIceExtent { get; set; } = 0.12f;
+
         /// <summary>The model transform applied to the test cube (world placement/orientation). Game code
         /// sets this each frame to move or spin the cube.</summary>
         public Matrix ModelTransform { get; set; } = Matrix.Identity;

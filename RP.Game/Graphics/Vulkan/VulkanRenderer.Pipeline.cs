@@ -314,11 +314,12 @@ namespace RP.Game.Graphics.Vulkan
                 DynamicStateCount = 2, PDynamicStates = dynamicStates,
             };
 
-            // Push constant: five vec4 (camera right/up/forward + aspect & tan-half-fov, then the sun's
-            // direction and colour so the backdrop's star agrees with the mesh lighting), fragment stage.
+            // Push constant: eight vec4 — camera basis (+aspect & tan-half-fov), the sun (direction +
+            // colour, shared with the mesh lighting), and the backdrop planet (eye-relative centre +
+            // radius, spin axis + angle, style) — exactly the guaranteed 128-byte budget.
             var pushRange = new PushConstantRange
             {
-                StageFlags = ShaderStageFlags.FragmentBit, Offset = 0, Size = 5 * 4 * sizeof(float),
+                StageFlags = ShaderStageFlags.FragmentBit, Offset = 0, Size = 8 * 4 * sizeof(float),
             };
             var layoutInfo = new PipelineLayoutCreateInfo
             {
@@ -395,14 +396,22 @@ namespace RP.Game.Graphics.Vulkan
             float aspect = _swapchainExtent.Height == 0 ? 1.0f : (float)_swapchainExtent.Width / _swapchainExtent.Height;
             float tanHalfFov = (float)System.Math.Tan(Camera.FieldOfView.Rad * 0.5);
 
-            float* push = stackalloc float[20];
+            float* push = stackalloc float[32];
             push[0] = right.X; push[1] = right.Y; push[2] = right.Z; push[3] = aspect;
             push[4] = up.X; push[5] = up.Y; push[6] = up.Z; push[7] = tanHalfFov;
             push[8] = forward.X; push[9] = forward.Y; push[10] = forward.Z; push[11] = 0f;
             Vector3 sunDir = SunDirection.LengthSquared > 1e-9f ? SunDirection.Normalize() : new Vector3(0, 1, 0);
             push[12] = sunDir.X; push[13] = sunDir.Y; push[14] = sunDir.Z; push[15] = 0f;
             push[16] = SunColor.X; push[17] = SunColor.Y; push[18] = SunColor.Z; push[19] = 0f;
-            _vk.CmdPushConstants(cb, _skyPipelineLayout, ShaderStageFlags.FragmentBit, 0, 20 * sizeof(float), push);
+
+            // The backdrop planet, eye-relative (the shader's rays start at the eye): rebase through the
+            // floating origin, then subtract the camera. Radius ≤ 0 tells the shader there is no planet.
+            var planetEye = (Vector3)(PlanetPosition - RenderOrigin) - camPos;
+            Vector3 spinAxis = PlanetSpinAxis.LengthSquared > 1e-9f ? PlanetSpinAxis.Normalize() : new Vector3(0, 1, 0);
+            push[20] = planetEye.X; push[21] = planetEye.Y; push[22] = planetEye.Z; push[23] = (float)PlanetRadius;
+            push[24] = spinAxis.X; push[25] = spinAxis.Y; push[26] = spinAxis.Z; push[27] = (float)PlanetSpinAngle;
+            push[28] = PlanetSeed; push[29] = PlanetOceanLevel; push[30] = PlanetIceExtent; push[31] = 0f;
+            _vk.CmdPushConstants(cb, _skyPipelineLayout, ShaderStageFlags.FragmentBit, 0, 32 * sizeof(float), push);
 
             _vk.CmdDraw(cb, 3, 1, 0, 0); // one full-screen triangle
         }

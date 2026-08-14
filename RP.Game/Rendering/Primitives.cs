@@ -239,11 +239,14 @@ namespace RP.Game.Rendering
         }
 
         /// <summary>
-        /// A distant world: a twice-subdivided icosphere (radius 0.5) painted with seeded latitudinal
-        /// climate bands — polar ice, temperate belts, an equatorial band — with noise-wobbled boundaries
-        /// so it reads as weather, not stripes. Colours stay below 1 (a planet reflects, it doesn't emit);
-        /// the standard mesh lighting gives it a day side, a night side, and a blue fresnel rim that reads
-        /// as atmosphere for free. One instance at a few tens of kilometres anchors the whole sky.
+        /// A mesh planet: a twice-subdivided icosphere (radius 0.5) painted with seeded latitudinal
+        /// climate bands with noise-wobbled boundaries. Colours stay below 1 (a planet reflects, it
+        /// doesn't emit); the standard mesh lighting gives it a day side, a night side, and a blue fresnel
+        /// rim. <b>Scope:</b> at 320 faces this suits mid-range set dressing — moons, orbs, holotable
+        /// globes — where the silhouette stays small. A planet that fills real sky must never be a mesh
+        /// (facets betray it); use the renderer's analytic backdrop planet
+        /// (<c>VulkanRenderer.PlanetPosition</c>/<c>PlanetRadius</c>), which ray-traces a perfect sphere
+        /// per pixel in the sky pass.
         /// </summary>
         public static Mesh Planet(int seed = 1)
         {

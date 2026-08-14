@@ -5,11 +5,14 @@
 // direction reconstructed from the camera basis in the push constant. Output is linear; the _SRGB swapchain
 // encodes it.
 layout(push_constant) uniform Sky {
-    vec4 right;    // xyz = camera right (render space), w = aspect ratio
-    vec4 up;       // xyz = camera up,                  w = tan(fov/2)
-    vec4 forward;  // xyz = camera forward
-    vec4 sunDir;   // xyz = unit direction toward the sun (matches the mesh key light)
-    vec4 sunColor; // rgb = the sun's light colour
+    vec4 right;        // xyz = camera right (render space), w = aspect ratio
+    vec4 up;           // xyz = camera up,                  w = tan(fov/2)
+    vec4 forward;      // xyz = camera forward
+    vec4 sunDir;       // xyz = unit direction toward the sun (matches the mesh key light)
+    vec4 sunColor;     // rgb = the sun's light colour
+    vec4 planetCentre; // xyz = planet centre relative to the eye, w = radius (<= 0: no planet)
+    vec4 planetSpin;   // xyz = unit rotation axis, w = current spin angle (radians)
+    vec4 planetStyle;  // x = seed, y = ocean level (0..1), z = polar ice extent (0..1)
 } sky;
 
 layout(location = 0) in vec2 vUV;
@@ -50,6 +53,13 @@ float fbm(vec3 p)
         a *= 0.5;
     }
     return s;
+}
+
+// Rodrigues rotation of v about a unit axis.
+vec3 rotateAxis(vec3 v, vec3 axis, float angle)
+{
+    float c = cos(angle);
+    return v * c + cross(axis, v) * sin(angle) + axis * dot(axis, v) * (1.0 - c);
 }
 
 // Sparse, sharp stars: one candidate per grid cell, only the brightest few percent survive.
@@ -94,6 +104,96 @@ void main()
     float halo = pow(max(sd, 0.0), 40.0);                     // broad glare
     col += sky.sunColor.rgb * (disc * 60.0 + corona * 6.0 + halo * 0.5);
     col += neb * cloud * halo * 0.8;                          // lit haze near the star
+
+    // ------------------------------------------------------------------------------------------
+    // The backdrop planet: a per-pixel ray-traced sphere impostor — how space games actually draw
+    // distant worlds. The silhouette is analytic (never faceted at any zoom), the terminator is
+    // shaded per pixel, and the atmosphere is the classic fresnel rim approximation of scattering
+    // on the disc plus a thin exponential halo just off the limb. Opaque where hit, so the planet
+    // correctly stands in front of nebula, stars and sun.
+    // ------------------------------------------------------------------------------------------
+    float R = sky.planetCentre.w;
+    if (R > 0.0)
+    {
+        vec3 pc = sky.planetCentre.xyz;
+        float b = dot(pc, dir);              // distance along the ray to the closest approach
+        if (b > 0.0)                          // in front of the eye
+        {
+            float h2 = dot(pc, pc) - b * b;   // squared miss distance at closest approach
+            float R2 = R * R;
+            vec3 atmCol = vec3(0.30, 0.55, 1.0);
+            vec3 axis = normalize(sky.planetSpin.xyz);
+
+            if (h2 < R2)
+            {
+                // --- On the disc: shade the near intersection point. ---
+                float t = b - sqrt(R2 - h2);
+                vec3 N = normalize(dir * t - pc);
+
+                // Sample the surface in the planet's rotating frame (clouds drift a little faster).
+                float seed = sky.planetStyle.x;
+                vec3 s = rotateAxis(N, axis, -sky.planetSpin.w);
+                vec3 cs = rotateAxis(N, axis, -sky.planetSpin.w * 1.35);
+
+                // Continents from low-frequency fbm; terrain character from a higher octave.
+                float cont = fbm(s * 3.1 + seed);
+                float detail = fbm(s * 9.7 + seed * 2.0);
+                float land = smoothstep(sky.planetStyle.y - 0.04, sky.planetStyle.y + 0.04, cont);
+
+                vec3 ocean = mix(vec3(0.012, 0.05, 0.12), vec3(0.03, 0.15, 0.22),
+                                 smoothstep(0.25, sky.planetStyle.y, cont));
+                vec3 lowland = mix(vec3(0.06, 0.11, 0.05), vec3(0.24, 0.20, 0.11), detail);
+                vec3 highland = vec3(0.36, 0.31, 0.23);
+                vec3 ground = mix(lowland, highland, smoothstep(0.72, 0.95, cont + detail * 0.2));
+                vec3 albedo = mix(ocean, ground, land);
+
+                // Polar caps by axial latitude, edges roughened by the detail octave.
+                float lat = abs(dot(s, axis));
+                float ice = smoothstep(1.0 - sky.planetStyle.z - 0.06, 1.0 - sky.planetStyle.z + 0.04,
+                                       lat + detail * 0.05);
+                albedo = mix(albedo, vec3(0.75, 0.79, 0.85), ice);
+
+                // A drifting cloud deck above it all.
+                float clouds = smoothstep(0.52, 0.74, fbm(cs * 5.3 + seed * 3.0 + 7.0));
+                albedo = mix(albedo, vec3(0.90, 0.92, 0.95), clouds * 0.85);
+
+                // Day side, soft terminator, and a warm twilight band along it.
+                float ndl = dot(N, toSun);
+                float day = smoothstep(-0.05, 0.25, ndl);
+                vec3 lit = albedo * sky.sunColor.rgb * day;
+                lit += vec3(0.9, 0.35, 0.10) * exp(-abs(ndl) * 12.0) * 0.14;
+
+                // Sun glint off open water (suppressed by land, cloud and night).
+                float glint = pow(max(dot(reflect(-toSun, N), -dir), 0.0), 220.0)
+                              * (1.0 - land) * (1.0 - clouds) * day;
+                lit += sky.sunColor.rgb * glint * 1.6;
+
+                // The night side is not dead: starlit floor plus warm city specks on clear land.
+                float night = 1.0 - day;
+                float cities = step(0.9985, hash13(floor(s * 340.0)))
+                               * land * (1.0 - ice) * (1.0 - clouds);
+                lit += vec3(1.0, 0.72, 0.35) * cities * night * 2.0;
+                lit += albedo * 0.012;
+
+                // In-disc atmosphere: the fresnel rim that approximates Rayleigh scattering.
+                float fres = pow(1.0 - max(dot(N, -dir), 0.0), 3.0);
+                lit += atmCol * fres * (0.30 + 0.70 * day);
+
+                col = lit; // opaque
+            }
+            else
+            {
+                // --- Just off the limb: the thin scattering halo, brighter on the sunlit side. ---
+                float shell = (sqrt(h2) - R) / (R * 0.045);
+                if (shell < 1.0)
+                {
+                    vec3 limbN = normalize(dir * b - pc);
+                    float litSide = clamp(dot(limbN, toSun) * 0.5 + 0.5, 0.0, 1.0);
+                    col += atmCol * exp(-shell * 3.2) * (0.25 + 0.75 * litSide) * 0.8;
+                }
+            }
+        }
+    }
 
     outColor = vec4(col, 1.0);
 }
