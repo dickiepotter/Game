@@ -90,6 +90,7 @@ namespace RP.Game.Graphics.Vulkan
         private Image[] _swapchainImages = Array.Empty<Image>();
         private ImageView[] _swapchainImageViews = Array.Empty<ImageView>();
         private Format _swapchainFormat;
+        private bool _canCaptureFrames;
         private Extent2D _swapchainExtent;
 
         // ---- Per-frame command + sync objects ----
@@ -188,6 +189,21 @@ namespace RP.Game.Graphics.Vulkan
         /// <param name="log">Where Vulkan validation and lifecycle messages go.</param>
         /// <param name="enableValidation">Turn the validation layers on. Do this in debug builds; the
         /// brief makes it non-negotiable when no human is reviewing mid-build (S4.2). Strip for release.</param>
+        /// <summary>Which shape the instanced entity stream is drawn with.</summary>
+        public enum InstanceMeshKind
+        {
+            /// <summary>A sphere. Right for glows, particles and anything that reads as light.</summary>
+            Orb,
+
+            /// <summary>A cube. Right for a voxel world, whose entities are made of the same stuff as it is.</summary>
+            Cube,
+        }
+
+        /// <summary>
+        /// The shape used for the instanced entity stream. Set it before the renderer is constructed.
+        /// </summary>
+        public static InstanceMeshKind InstanceMesh { get; set; } = InstanceMeshKind.Orb;
+
         public VulkanRenderer(IWindow window, Logger log, bool enableValidation)
         {
             _window = window ?? throw new ArgumentNullException(nameof(window));
@@ -811,6 +827,17 @@ namespace RP.Game.Graphics.Vulkan
                 imageCount = support.Capabilities.MaxImageCount;
             }
 
+            // Ask for TransferSrc so a finished frame can be copied back for a screenshot. It is almost
+            // universally supported, but "almost" is not "always" and a swapchain that fails to create is
+            // a game that fails to start -- so it is requested only when the surface says it can, and its
+            // absence costs nothing but the ability to capture.
+            ImageUsageFlags usage = ImageUsageFlags.ColorAttachmentBit | ImageUsageFlags.TransferDstBit;
+            if ((support.Capabilities.SupportedUsageFlags & ImageUsageFlags.TransferSrcBit) != 0)
+            {
+                usage |= ImageUsageFlags.TransferSrcBit;
+                _canCaptureFrames = true;
+            }
+
             var createInfo = new SwapchainCreateInfoKHR
             {
                 SType = StructureType.SwapchainCreateInfoKhr,
@@ -820,8 +847,9 @@ namespace RP.Game.Graphics.Vulkan
                 ImageColorSpace = surfaceFormat.ColorSpace,
                 ImageExtent = extent,
                 ImageArrayLayers = 1,
-                // We draw into these images (ColorAttachment). TransferDst is handy for later (blits/clears).
-                ImageUsage = ImageUsageFlags.ColorAttachmentBit | ImageUsageFlags.TransferDstBit,
+                // We draw into these images (ColorAttachment); TransferDst is handy for blits and clears,
+                // and TransferSrc, where offered, is what makes a screenshot possible.
+                ImageUsage = usage,
                 PreTransform = support.Capabilities.CurrentTransform,
                 CompositeAlpha = CompositeAlphaFlagsKHR.OpaqueBitKhr,
                 PresentMode = presentMode,
@@ -1082,6 +1110,16 @@ namespace RP.Game.Graphics.Vulkan
 
             Result submit = _vk.QueueSubmit(_graphicsQueue, 1, in submitInfo, fence);
             if (submit != Result.Success) throw new VulkanException("vkQueueSubmit failed", submit);
+
+            // A capture, if one was asked for: after the frame is submitted so the image is complete, and
+            // before it is presented, because presenting hands the image back to the presentation engine
+            // and touching it afterwards is a use of something we no longer own.
+            if (_captureRequest != null)
+            {
+                string path = _captureRequest;
+                _captureRequest = null;
+                CaptureFrame(imageIndex, path);
+            }
 
             // 4. Present: hand the finished image to the OS, waiting on "render finished" first.
             SwapchainKHR swapchain = _swapchain;

@@ -484,6 +484,12 @@ namespace RP.Game.Voxels
             if (NoClip)
             {
                 StepNoClip(dt, wishDirection, jump, sprint);
+
+                // Still ask what the head is in. Flying does not exempt a body from being underwater as
+                // far as anyone looking out of it is concerned, and without this the camera flies into a
+                // lake and the water simply is not there -- which is both wrong and, when it is how you
+                // are checking what water looks like, quietly misleading.
+                SampleFluid(world, world.Palette);
                 return;
             }
 
@@ -661,7 +667,6 @@ namespace RP.Game.Voxels
 
             Position += Velocity * dt;
             OnGround = false;
-            InFluid = false;
             _jumpAscent = false;
         }
 

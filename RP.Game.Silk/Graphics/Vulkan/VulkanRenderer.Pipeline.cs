@@ -399,10 +399,17 @@ namespace RP.Game.Graphics.Vulkan
             float* push = stackalloc float[32];
             push[0] = right.X; push[1] = right.Y; push[2] = right.Z; push[3] = aspect;
             push[4] = up.X; push[5] = up.Y; push[6] = up.Z; push[7] = tanHalfFov;
-            push[8] = forward.X; push[9] = forward.Y; push[10] = forward.Z; push[11] = 0f;
+            // The sky has to know what time it is. Without it this pass draws deep space at noon while the
+            // voxel pass fades its distant hills into a blue morning sky, and the horizon becomes the seam
+            // between two renderers that disagree about which world this is.
+            push[8] = forward.X; push[9] = forward.Y; push[10] = forward.Z; push[11] = Daylight;
             Vector3 sunDir = SunDirection.LengthSquared > 1e-9f ? SunDirection.Normalize() : new Vector3(0, 1, 0);
             push[12] = sunDir.X; push[13] = sunDir.Y; push[14] = sunDir.Z; push[15] = 0f;
-            push[16] = SunColor.X; push[17] = SunColor.Y; push[18] = SunColor.Z; push[19] = 0f;
+            // The sky is absorbed by a fluid just as the world is. Without it, looking up from the bottom
+            // of a lake shows an undimmed blue sky over a green-blue world, which reads as standing in fog
+            // rather than as being under something.
+            push[16] = SunColor.X; push[17] = SunColor.Y; push[18] = SunColor.Z;
+            push[19] = System.Math.Clamp(SubmergedFluid, 0, 3);
 
             // The backdrop planet, eye-relative (the shader's rays start at the eye): rebase through the
             // floating origin, then subtract the camera. Radius ≤ 0 tells the shader there is no planet.

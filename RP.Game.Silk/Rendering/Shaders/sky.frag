@@ -7,9 +7,9 @@
 layout(push_constant) uniform Sky {
     vec4 right;        // xyz = camera right (render space), w = aspect ratio
     vec4 up;           // xyz = camera up,                  w = tan(fov/2)
-    vec4 forward;      // xyz = camera forward
+    vec4 forward;      // xyz = camera forward,            w = daylight in [0,1]
     vec4 sunDir;       // xyz = unit direction toward the sun (matches the mesh key light)
-    vec4 sunColor;     // rgb = the sun's light colour
+    vec4 sunColor;     // rgb = the sun's light colour,    w = submerged fluid kind (0..3)
     vec4 planetCentre; // xyz = planet centre relative to the eye, w = radius (<= 0: no planet)
     vec4 planetSpin;   // xyz = unit rotation axis, w = current spin angle (radians)
     vec4 planetStyle;  // x = seed, y = ocean level (0..1), z = polar ice extent (0..1)
@@ -102,7 +102,7 @@ void main()
     float disc = smoothstep(0.99988, 0.99996, sd);            // ~0.5 deg core
     float corona = pow(max(sd, 0.0), 2200.0);                 // hot rim hugging the disc
     float halo = pow(max(sd, 0.0), 40.0);                     // broad glare
-    col += sky.sunColor.rgb * (disc * 60.0 + corona * 6.0 + halo * 0.5);
+    vec3 sunGlow = sky.sunColor.rgb * (disc * 60.0 + corona * 6.0 + halo * 0.5);
     col += neb * cloud * halo * 0.8;                          // lit haze near the star
 
     // ------------------------------------------------------------------------------------------
@@ -193,6 +193,64 @@ void main()
                 }
             }
         }
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Atmosphere.
+    //
+    // Everything above draws the view from orbit: nebula, stars, a planet hanging in the distance.
+    // Stood on the surface of a world with air on it, you see almost none of that, and the sky the
+    // voxel pass fades its distant hills into has to be the same sky drawn here -- otherwise the
+    // horizon is a seam where a blue haze meets a starfield, which is precisely what it was.
+    //
+    // So the space backdrop is what remains when the daylight goes, and the atmosphere is laid over it
+    // in proportion. The stars do not switch off at dawn; they wash out, which is what they do.
+    // ------------------------------------------------------------------------------------------
+    float daylight = sky.forward.w;
+
+    if (daylight > 0.001)
+    {
+        float upness = dir.y * 0.5 + 0.5;
+
+        vec3 dayZenith   = vec3(0.16, 0.34, 0.72);
+        vec3 dayHorizon  = vec3(0.62, 0.74, 0.92);
+        vec3 duskHorizon = vec3(0.85, 0.42, 0.22);
+        vec3 nightZenith = vec3(0.012, 0.018, 0.045);
+        vec3 nightHorizon = vec3(0.05, 0.06, 0.11);
+
+        // Dusk peaks when the sun is near the horizon, which is where daylight is midway through its
+        // range. The same curve the voxel pass uses, so the two agree through sunrise and sunset as
+        // well as at noon.
+        float dusk = 1.0 - abs(daylight * 2.0 - 1.0);
+        dusk = pow(clamp(dusk, 0.0, 1.0), 2.0);
+
+        vec3 horizon = mix(nightHorizon, mix(dayHorizon, duskHorizon, dusk * 0.8), daylight);
+        vec3 zenith  = mix(nightZenith, dayZenith, daylight);
+        vec3 atmosphere = mix(horizon, zenith, clamp(upness, 0.0, 1.0));
+
+        // Air scatters sunlight forward, so the sky brightens toward the sun rather than being a flat
+        // gradient. Cheap, and it is most of what stops a procedural sky looking painted.
+        atmosphere += sky.sunColor.rgb * pow(max(sd, 0.0), 6.0) * 0.20 * daylight;
+
+        col = mix(col, atmosphere, daylight);
+    }
+
+    // The sun itself is added after the blend, so the disc survives into full daylight instead of being
+    // mixed away into the very sky it is lighting.
+    col += sunGlow;
+
+    // Under a fluid, the sky is the furthest thing there is, so almost none of it survives the water
+    // between here and it. Almost, not none: a little light does come down through the surface, and
+    // losing it entirely turns a lake bed into a cave.
+    int submerged = int(sky.sunColor.w + 0.5);
+
+    if (submerged > 0)
+    {
+        vec3 fluidColor = submerged == 1 ? vec3(0.09, 0.26, 0.34)
+                        : (submerged == 2 ? vec3(0.65, 0.18, 0.03) : vec3(0.02, 0.02, 0.03));
+
+        float remaining = submerged == 1 ? 0.22 : 0.04;
+        col = mix(fluidColor, col, remaining);
     }
 
     outColor = vec4(col, 1.0);

@@ -228,14 +228,20 @@ namespace RP.Game.Graphics.Vulkan
         }
 
         /// <summary>
-        /// Builds the default instanced FX mesh: a <see cref="Primitives.Orb"/> point of light. Everything
-        /// on this stream — dust, particles, engine glow, flares — is a glow, so a white sphere the
-        /// per-instance tint colours (and the bloom pass flares) reads correctly at every size. Ships and
-        /// props have their own batches with real meshes.
+        /// Builds the instanced mesh every entity on the fast stream is drawn with.
         /// </summary>
+        /// <remarks>
+        /// <para>An orb by default, because everything on this stream in a space game — dust, particles,
+        /// engine glow, flares — is a glow, and a white sphere the per-instance tint colours (and the bloom
+        /// pass flares) reads correctly at every size.</para>
+        ///
+        /// <para>A voxel game wants the opposite, and the difference is not cosmetic. A block that has lost
+        /// its support and is falling has to be drawn as the block it is, or a collapse looks like the wall
+        /// turning into a shower of pebbles. The game says which it wants; the default stays as it was.</para>
+        /// </remarks>
         private void CreateCubeMesh()
         {
-            Primitives.Mesh mesh = Primitives.Orb();
+            Primitives.Mesh mesh = InstanceMesh == InstanceMeshKind.Cube ? Primitives.Cube() : Primitives.Orb();
             _meshIndexCount = (uint)mesh.Indices.Length;
             (_meshVertexBuffer, _meshVertexMemory) =
                 CreateDeviceLocalBuffer<Vertex>(mesh.Vertices, BufferUsageFlags.VertexBufferBit);
