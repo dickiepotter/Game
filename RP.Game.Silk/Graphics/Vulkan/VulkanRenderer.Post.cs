@@ -131,6 +131,10 @@ namespace RP.Game.Graphics.Vulkan
             {
                 throw new VulkanException("vkCreateImageView (color) failed", Result.ErrorUnknown);
             }
+
+            // Vulkan will not tell you a view's format after the fact, and the render-pass path has to
+            // build a pass that matches one. Recorded here, where it is known for certain.
+            RegisterAttachmentView(view, format, SampleCountFlags.Count1Bit);
             return view;
         }
 
@@ -326,7 +330,8 @@ namespace RP.Game.Graphics.Vulkan
             var pipelineInfo = new GraphicsPipelineCreateInfo
             {
                 SType = StructureType.GraphicsPipelineCreateInfo,
-                PNext = &renderingCreateInfo,
+                PNext = _useRenderPasses ? null : &renderingCreateInfo,
+                RenderPass = _useRenderPasses ? CompatibilityPassFor(in renderingCreateInfo) : default,
                 StageCount = 2, PStages = stages,
                 PVertexInputState = &vertexInput,
                 PInputAssemblyState = &inputAssembly,

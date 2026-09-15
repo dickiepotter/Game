@@ -472,7 +472,11 @@ namespace RP.Game.Graphics.Vulkan
                 if (!TryFindQueueFamilies(device, out _, out _)) continue;
                 if (!SupportsSwapchain(device)) continue;
                 if (!SwapchainAdequate(device)) continue;
-                if (!SupportsDynamicRendering(device, out _)) continue;
+                // A device without dynamic rendering is no longer disqualified: the render-pass path
+                // covers it. Skipping it here was the single largest compatibility hole in a renderer whose
+                // stated target is machines from about ten years ago -- those devices got as far as
+                // "No suitable Vulkan GPU" and no further.
+                if (!SupportsDynamicRendering(device, out _) && !CanFallBackToRenderPasses(device)) continue;
 
                 _vk.GetPhysicalDeviceProperties(device, out PhysicalDeviceProperties props);
                 int score = props.DeviceType == PhysicalDeviceType.DiscreteGpu ? 1000 : 100;
@@ -493,13 +497,21 @@ namespace RP.Game.Graphics.Vulkan
 
             _physicalDevice = chosen;
             TryFindQueueFamilies(chosen, out _graphicsFamily, out _presentFamily);
-            SupportsDynamicRendering(chosen, out _dynamicRenderingViaExtension);
+            bool dynamic = SupportsDynamicRendering(chosen, out _dynamicRenderingViaExtension);
+            _useRenderPasses = ForceRenderPass || !dynamic;
 
             _vk.GetPhysicalDeviceProperties(chosen, out PhysicalDeviceProperties chosenProps);
             string name = SilkMarshal.PtrToString((nint)chosenProps.DeviceName) ?? "(unknown)";
             var apiVersion = (Version32)chosenProps.ApiVersion;
             _log.Info("Vulkan", $"Selected GPU: {name} ({chosenProps.DeviceType}), Vulkan {apiVersion.Major}.{apiVersion.Minor}.{apiVersion.Patch}.");
-            _log.Info("Vulkan", _dynamicRenderingViaExtension
+            if (_useRenderPasses)
+            {
+                _log.Info("Vulkan", ForceRenderPass && dynamic
+                    ? "Render passes (forced; this device supports dynamic rendering)."
+                    : "Render passes: this device has no dynamic rendering.");
+            }
+
+            if (!_useRenderPasses) _log.Info("Vulkan", _dynamicRenderingViaExtension
                 ? "Dynamic rendering via VK_KHR_dynamic_rendering (device predates Vulkan 1.3)."
                 : "Dynamic rendering via core Vulkan 1.3.");
 
@@ -545,7 +557,7 @@ namespace RP.Game.Graphics.Vulkan
                 Integrated = integrated,
                 ApiVersion = ((int)apiVersion.Major, (int)apiVersion.Minor),
                 DeviceMemoryMb = deviceMemoryMb,
-                DynamicRendering = true,
+                DynamicRendering = !_useRenderPasses,
                 DynamicRenderingIsCore = !_dynamicRenderingViaExtension,
                 MaxSampleCount = maxSamples,
                 Tier = QualityOverride ?? GraphicsCapabilities.ChooseTier(integrated, deviceMemoryMb, (int)apiVersion.Minor),
@@ -626,6 +638,20 @@ namespace RP.Game.Graphics.Vulkan
         /// rather than surfacing later as a misleading vkCreateDevice error — AMD's older drivers answer
         /// an unrecognised pNext feature struct with ErrorOutOfHostMemory, which reads as a memory fault.
         /// </remarks>
+        /// <summary>
+        /// Whether a device can run the render-pass path, which every Vulkan 1.0 device can.
+        /// </summary>
+        /// <remarks>
+        /// Kept as a named predicate rather than a literal <c>true</c> because it is the place any future
+        /// requirement of the fallback belongs, and because "this always works" is a claim worth making
+        /// once, visibly, rather than implying by omission.
+        /// </remarks>
+        private static bool CanFallBackToRenderPasses(PhysicalDevice device)
+        {
+            _ = device;
+            return true;
+        }
+
         private bool SupportsDynamicRendering(PhysicalDevice device, out bool viaExtension)
         {
             viaExtension = false;
@@ -741,6 +767,12 @@ namespace RP.Game.Graphics.Vulkan
         // so every draw goes through these and stays oblivious to which device it landed on.
         private void BeginRendering(CommandBuffer cb, in RenderingInfo renderingInfo)
         {
+            if (_useRenderPasses)
+            {
+                BeginRenderPassCompat(cb, in renderingInfo);
+                return;
+            }
+
             if (_khrDynamicRendering is not null)
             {
                 _khrDynamicRendering.CmdBeginRendering(cb, in renderingInfo);
@@ -753,6 +785,12 @@ namespace RP.Game.Graphics.Vulkan
 
         private void EndRendering(CommandBuffer cb)
         {
+            if (_useRenderPasses)
+            {
+                _vk.CmdEndRenderPass(cb);
+                return;
+            }
+
             if (_khrDynamicRendering is not null)
             {
                 _khrDynamicRendering.CmdEndRendering(cb);
@@ -954,6 +992,8 @@ namespace RP.Game.Graphics.Vulkan
 
                 Result result = _vk.CreateImageView(_device, in createInfo, null, out _swapchainImageViews[i]);
                 if (result != Result.Success) throw new VulkanException("vkCreateImageView failed", result);
+
+                RegisterAttachmentView(_swapchainImageViews[i], _swapchainFormat, SampleCountFlags.Count1Bit);
             }
         }
 
@@ -1289,6 +1329,11 @@ namespace RP.Game.Graphics.Vulkan
 
             _vk.DeviceWaitIdle(_device);
 
+            // Framebuffers name their attachments by handle and every one of those is about to be
+            // recreated, so the cache has to go with them. A stale framebuffer is a use-after-free that
+            // shows up as a device-lost several frames after the resize that caused it.
+            DestroyRenderPassCache();
+
             DestroySwapchain();
             CreateSwapchain();
             CreateImageViews();
@@ -1332,6 +1377,8 @@ namespace RP.Game.Graphics.Vulkan
 
             // Never destroy objects the GPU might still be using.
             _vk.DeviceWaitIdle(_device);
+
+            DestroyRenderPassCache();
 
             for (int i = 0; i < MaxFramesInFlight; i++)
             {

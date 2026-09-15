@@ -551,7 +551,8 @@ namespace RP.Game.Graphics.Vulkan
             var pipelineInfo = new GraphicsPipelineCreateInfo
             {
                 SType = StructureType.GraphicsPipelineCreateInfo,
-                PNext = &renderingCreateInfo,
+                PNext = _useRenderPasses ? null : &renderingCreateInfo,
+                RenderPass = _useRenderPasses ? CompatibilityPassFor(in renderingCreateInfo) : default,
                 StageCount = 2,
                 PStages = stages,
                 PVertexInputState = &vertexInput,

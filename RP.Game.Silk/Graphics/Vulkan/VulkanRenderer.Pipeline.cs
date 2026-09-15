@@ -222,7 +222,8 @@ namespace RP.Game.Graphics.Vulkan
             var pipelineInfo = new GraphicsPipelineCreateInfo
             {
                 SType = StructureType.GraphicsPipelineCreateInfo,
-                PNext = &renderingCreateInfo,
+                PNext = _useRenderPasses ? null : &renderingCreateInfo,
+                RenderPass = _useRenderPasses ? CompatibilityPassFor(in renderingCreateInfo) : default,
                 StageCount = 2,
                 PStages = stages,
                 PVertexInputState = &vertexInput,
@@ -234,7 +235,6 @@ namespace RP.Game.Graphics.Vulkan
                 PColorBlendState = &colorBlending,
                 PDynamicState = &dynamicState,
                 Layout = _pipelineLayout,
-                RenderPass = default, // none — we use dynamic rendering
                 Subpass = 0,
             };
 
@@ -351,7 +351,8 @@ namespace RP.Game.Graphics.Vulkan
             var pipelineInfo = new GraphicsPipelineCreateInfo
             {
                 SType = StructureType.GraphicsPipelineCreateInfo,
-                PNext = &renderingCreateInfo,
+                PNext = _useRenderPasses ? null : &renderingCreateInfo,
+                RenderPass = _useRenderPasses ? CompatibilityPassFor(in renderingCreateInfo) : default,
                 StageCount = 2, PStages = stages,
                 PVertexInputState = &vertexInput,
                 PInputAssemblyState = &inputAssembly,
