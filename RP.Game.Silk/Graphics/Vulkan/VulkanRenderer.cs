@@ -197,6 +197,7 @@ namespace RP.Game.Graphics.Vulkan
             CreateDepthResources();
             CreateGraphicsPipeline();
             CreateSkyPipeline();
+            CreateVoxelPipeline();  // the chunk pass: static meshes, back-face culled, baked light
             CreatePostResources();   // HDR + bloom targets + sampler
             CreatePostObjects();     // descriptor pool/layouts/sets + bright/blur/composite pipelines
             UpdatePostDescriptorSets();
@@ -209,6 +210,7 @@ namespace RP.Game.Graphics.Vulkan
             CreateCapitalMesh(); // capital hull + its own per-frame instance buffers
             CreateShipBatch();   // ship hull batch (Dart by default; SetShipModel swaps in a loaded mesh)
             CreatePropBatches(); // extra prop batches (rocks, wrecks) — meshes supplied via SetPropModel
+            CreateChunkSlots();  // the voxel chunk slot free-list (no GPU work; buffers arrive with meshes)
             CreateSyncObjects();
 
             _log.Info("Vulkan", $"Renderer up: {_swapchainImages.Length} swapchain images at " +
@@ -952,6 +954,12 @@ namespace RP.Game.Graphics.Vulkan
             //    semaphores is safe.
             _vk.WaitForFences(_device, 1, in fence, true, ulong.MaxValue);
 
+            // With this frame slot's previous work confirmed finished, it is safe to retire chunk buffers
+            // whose deferred-free countdown has expired. Doing it here rather than at removal time is what
+            // stops a chunk that scrolled out of view being destroyed while an in-flight frame still reads
+            // it — a use-after-free that shows up as a random device-lost minutes into a session.
+            DrainPendingFrees();
+
             // 2. Acquire the next image to draw into. If the swapchain is out of date (e.g. the window
             //    resized), rebuild it and skip this frame.
             uint imageIndex = 0;
@@ -1111,8 +1119,9 @@ namespace RP.Game.Graphics.Vulkan
             };
 
             BeginRendering(cb, in renderingInfo);
-            RecordSky(cb);  // procedural starfield/nebula backdrop, behind everything
-            RecordMesh(cb); // the lit hulls, depth-tested over the backdrop
+            RecordSky(cb);    // procedural starfield/nebula backdrop, behind everything
+            RecordVoxels(cb); // the voxel world: one draw per visible chunk, opaque and depth-writing
+            RecordMesh(cb);   // the lit hulls, depth-tested over the backdrop
             EndRendering(cb);
 
             // --- Post: bloom the HDR scene and composite + tonemap into the swapchain image, ready to present ---
@@ -1235,6 +1244,7 @@ namespace RP.Game.Graphics.Vulkan
             DestroyCapitalResources();
             DestroyShipResources();
             DestroyPropResources();
+            DestroyVoxelResources();
 
             DestroyHud();
             DestroyPostObjects();
