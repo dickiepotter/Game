@@ -345,6 +345,23 @@ namespace RP.Game.Voxels
         /// <summary>Whether the body is currently standing on something.</summary>
         public bool OnGround { get; private set; }
 
+        /// <summary>
+        /// How fast the body was falling when it last hit the ground, in blocks per second. Zero on any
+        /// step that did not end in a landing.
+        /// </summary>
+        /// <remarks>
+        /// <para>Reported rather than accumulated as "fall distance", because speed is the thing that
+        /// actually matters and distance is a proxy for it that stops being one the moment anything else is
+        /// involved. A body that fell six blocks into water and then stepped out has fallen six blocks and
+        /// arrives harmlessly; one that fell three and was pushed on the way down arrives faster than its
+        /// distance suggests. Terminal velocity, buoyancy and drag are all already in the velocity, so
+        /// taking the number from there means none of them need restating.</para>
+        ///
+        /// <para>Cleared every step, so a caller that reads it once per step sees each landing exactly
+        /// once and cannot double-count one.</para>
+        /// </remarks>
+        public double LandingSpeed { get; private set; }
+
         /// <summary>Whether the body is inside a fluid, which changes how it moves.</summary>
         public bool InFluid { get; private set; }
 
@@ -602,6 +619,7 @@ namespace RP.Game.Voxels
             var delta = new Vector3d(vx * dt, vy * dt, vz * dt);
 
             Vector3d beforeMove = min;
+            double approachSpeed = vy;
             VoxelCollision.MoveResult result = VoxelCollision.Move(world, ref min, size, delta);
 
             // Step-up: if the horizontal move was blocked while on the ground, try again from a raised
@@ -641,6 +659,15 @@ namespace RP.Game.Voxels
 
             Velocity = new Vector3d(vx, vy, vz);
             Position = new Vector3d(min.X + (Width * 0.5), min.Y, min.Z + (Width * 0.5));
+
+            // Taken from the velocity going in, since resolving the collision is what zeroes it -- and only
+            // for a body that was actually in the air. A body at rest still gains a frame of gravity before
+            // the floor takes it away again, so without the airborne test every single frame spent standing
+            // still reports a small landing, and anything counting them accumulates damage from doing
+            // nothing at all.
+            bool wasAirborne = !OnGround;
+
+            LandingSpeed = wasAirborne && result.Landed && approachSpeed < 0.0 ? -approachSpeed : 0.0;
 
             OnGround = result.Landed || VoxelCollision.IsSupported(world, min, size);
             if (OnGround) _coyoteTimer = CoyoteTime;

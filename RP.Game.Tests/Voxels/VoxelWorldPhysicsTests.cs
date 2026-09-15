@@ -466,6 +466,65 @@ namespace RP.Game.Tests.Voxels
         }
 
         [TestMethod]
+        public void Character_ReportsHowFastItWasGoingWhenItLanded()
+        {
+            // What fall damage is worked out from. Speed rather than distance, because distance stops
+            // being a proxy for impact the moment water, drag or a push is involved.
+            VoxelVolume world = WorldWithFloor();
+            VoxelCharacter character = NewCharacter(world, new Vector3d(0, 40, 0));
+
+            const double Dt = 1.0 / 60.0;
+            double reported = 0;
+
+            for (int i = 0; i < 600; i++)
+            {
+                character.Step(world, Dt, default, false, false);
+                if (character.LandingSpeed > 0) { reported = character.LandingSpeed; break; }
+            }
+
+            // Fell 39 blocks under gravity 25: sqrt(2 * 25 * 39) is about 44.
+            reported.Should().BeInRange(40.0, 48.0);
+        }
+
+        [TestMethod]
+        public void Character_ReportsNoImpactWhenItIsNotLanding()
+        {
+            VoxelVolume world = WorldWithFloor();
+            VoxelCharacter character = NewCharacter(world, new Vector3d(0, 1, 0));
+            Simulate(character, world, 1.0);
+
+            character.LandingSpeed.Should().Be(0.0, "standing still is not an impact");
+
+            Simulate(character, world, 0.2, wish: new Vector3d(1, 0, 0));
+            character.LandingSpeed.Should().Be(0.0, "nor is walking along the floor");
+        }
+
+        [TestMethod]
+        public void Character_ArrivesGentlyWhenItFallsIntoWater()
+        {
+            // The reason speed is the right measure: the same drop is lethal onto stone and survivable into
+            // a lake, and nothing has to say so -- drag and buoyancy are already in the velocity.
+            const double Dt = 1.0 / 60.0;
+
+            double Drop(VoxelVolume into)
+            {
+                VoxelCharacter body = NewCharacter(into, new Vector3d(0, 40, 0));
+                for (int i = 0; i < 900; i++)
+                {
+                    body.Step(into, Dt, default, false, false);
+                    if (body.LandingSpeed > 0) return body.LandingSpeed;
+                }
+
+                return 0;
+            }
+
+            double ontoStone = Drop(WorldWithFloor());
+            double intoWater = Drop(PoolWorld(depth: 8));
+
+            intoWater.Should().BeLessThan(ontoStone * 0.6, "the water should take most of the impact out");
+        }
+
+        [TestMethod]
         public void Character_CoyoteTime_AllowsAJumpJustAfterLeavingAnEdge()
         {
             VoxelVolume world = NewWorld();
