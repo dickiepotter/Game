@@ -77,10 +77,12 @@ float valueNoise(vec3 p)
                mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y), f.z);
 }
 
-// Two octaves is enough to read as surface grain and no more than the budget allows at this fill rate.
+// One octave. Two read slightly richer and cost twice as much, and at full-screen fill rate on an
+// integrated GPU that is not a trade worth making -- the second octave is almost invisible once ambient
+// occlusion and the light grid are multiplying over it.
 float detailNoise(vec3 p)
 {
-    return valueNoise(p) * 0.65 + valueNoise(p * 2.7) * 0.35;
+    return valueNoise(p);
 }
 
 // The sky colour at a given elevation, for a given time of day. Shared by the fog so that a distant
@@ -139,7 +141,7 @@ void main()
         brick.x += floor(brick.y) * 0.5;                 // offset alternate courses
         vec2 cell = abs(fract(brick) - 0.5);
         float mortar = smoothstep(0.42, 0.5, max(cell.x, cell.y));
-        grain = 0.5 + 0.35 * detailNoise(vWorldPos * 3.0) - mortar * 0.55;
+        grain = 0.5 + 0.35 * detailNoise(vWorldPos * 3.4) - mortar * 0.55;
     }
     else if (surface == SURFACE_CRYSTAL)
     {
@@ -160,18 +162,31 @@ void main()
     vec3 albedo = baseColor * detail;
 
     // ---- Normal perturbation ------------------------------------------------------------------------
-    // Cubes have four flat normals and nothing for a specular highlight to catch. Nudging the normal by
+    // Cubes have four flat normals and nothing for a specular highlight to catch. Perturbing the normal by
     // the gradient of the detail field gives the surface something to glint off, which is most of what
     // sells stone as stone rather than as a coloured plane.
-    if (surface != SURFACE_MATTE || variation > 0.0)
+    //
+    // The gradient comes from screen-space derivatives of the value we already have, not from sampling the
+    // noise field again either side of the point on each axis. That naive form needs six extra fetches per
+    // pixel -- and since each fetch is itself eight hashes, it was costing ninety-odd hash evaluations per
+    // pixel and dominating the entire frame. The surface-gradient formulation below reconstructs the same
+    // slope from two hardware derivatives, which the GPU computes across the quad for nothing.
+    if (variation > 0.0)
     {
-        float e = 0.35;
-        float dx = detailNoise(vWorldPos * 3.4 + vec3(e, 0, 0)) - detailNoise(vWorldPos * 3.4 - vec3(e, 0, 0));
-        float dy = detailNoise(vWorldPos * 3.4 + vec3(0, e, 0)) - detailNoise(vWorldPos * 3.4 - vec3(0, e, 0));
-        float dz = detailNoise(vWorldPos * 3.4 + vec3(0, 0, e)) - detailNoise(vWorldPos * 3.4 - vec3(0, 0, e));
-        vec3 bump = vec3(dx, dy, dz);
-        bump -= N * dot(bump, N);                        // keep the nudge tangential to the face
-        N = normalize(N + bump * variation * 0.6);
+        vec3 dpdx = dFdx(vWorldPos);
+        vec3 dpdy = dFdy(vWorldPos);
+        float dhdx = dFdx(grain);
+        float dhdy = dFdy(grain);
+
+        vec3 r1 = cross(dpdy, N);
+        vec3 r2 = cross(N, dpdx);
+        float det = dot(dpdx, r1);
+
+        if (abs(det) > 1e-8)
+        {
+            vec3 slope = (r1 * dhdx + r2 * dhdy) / det;
+            N = normalize(N - slope * variation * 0.25);
+        }
     }
 
     // ---- Light ---------------------------------------------------------------------------------------
