@@ -154,6 +154,24 @@ namespace RP.Game.Graphics.Vulkan
         public float FogStart { get; set; } = 40f;
 
         /// <summary>
+        /// Which fluid the camera is inside: 0 for none, 1 for water, 2 for lava, 3 for something dark
+        /// and thick such as oil or tar.
+        /// </summary>
+        /// <remarks>
+        /// <para>A kind rather than a colour, because the 128-byte push block every Vulkan
+        /// implementation is guaranteed to offer is already full and this has to work on the old hardware
+        /// the game targets. Four states fit in the room left over beside the surface-detail level; a
+        /// vec4 would have needed a uniform buffer and a descriptor set for information the shader can
+        /// perfectly well hold itself.</para>
+        ///
+        /// <para>Without this the fog under water tints toward the <i>sky</i>, and brightens toward the
+        /// sun on top of that, so putting your head under produces a pale haze that looks like fog on a
+        /// spring morning rather than like being submerged. The single most common report from anyone
+        /// swimming was simply that they could not see.</para>
+        /// </remarks>
+        public int SubmergedFluid { get; set; }
+
+        /// <summary>
         /// Uploads (or replaces) the mesh for one chunk. Returns false only if every slot is taken.
         /// </summary>
         /// <remarks>
@@ -636,7 +654,9 @@ namespace RP.Game.Graphics.Vulkan
                 chunkPush[2] = (float)oz;
                 // The spare slot in the per-chunk constant carries the detail level, so the fragment shader
                 // can skip its noise entirely on hardware that asked for less.
-                chunkPush[3] = Capabilities.SurfaceDetail;
+                // Two values in one float. Detail is 0, 1 or 2, so the fluid kind rides above it in
+                // steps of four and the shader takes them apart again with a divide and a subtract.
+                chunkPush[3] = Capabilities.SurfaceDetail + (4f * System.Math.Clamp(SubmergedFluid, 0, 3));
 
                 _vk.CmdPushConstants(
                     cb, _voxelPipelineLayout,

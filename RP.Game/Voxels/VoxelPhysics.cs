@@ -292,10 +292,49 @@ namespace RP.Game.Voxels
         /// <summary>How fast it converges while airborne — much lower, so a jump commits.</summary>
         public double AirAcceleration { get; set; } = 12.0;
 
-        /// <summary>Upward speed imparted by a jump.</summary>
-        /// <remarks>Chosen against <see cref="Gravity"/> to clear exactly one block with a little to
-        /// spare, which is the height the whole world is built in multiples of.</remarks>
-        public double JumpSpeed { get; set; } = 8.6;
+        /// <summary>
+        /// How high a jump from dry ground reaches, in blocks.
+        /// </summary>
+        /// <remarks>
+        /// Stated as a height rather than as an impulse because the height is the thing that matters and
+        /// the impulse is an implementation detail of the gravity constant. A world built in one-block
+        /// multiples is navigated by asking "can I get onto that?", and the answer has to be a number
+        /// someone can reason about without solving a quadratic. Two blocks and a little over, so a
+        /// two-high step is reliably clearable rather than something you land on if the frame timing
+        /// happens to be kind.
+        /// </remarks>
+        public double JumpHeight { get; set; } = 2.08;
+
+        /// <summary>
+        /// How high a jump reaches when standing in a thin fluid such as water, in blocks.
+        /// </summary>
+        /// <remarks>
+        /// Water costs you half a block. It is enough to notice immediately -- a ledge you were hopping
+        /// onto a moment ago is suddenly out of reach -- without making a shallow stream a wall.
+        /// </remarks>
+        public double WaterJumpHeight { get; set; } = 1.55;
+
+        /// <summary>
+        /// How high a jump reaches when standing in a thick fluid such as lava, oil or tar, in blocks.
+        /// </summary>
+        /// <remarks>
+        /// One block, and no more. Wading into tar should feel like a decision: you can still climb out of
+        /// a one-deep channel, and you cannot bound out of a pit you walked into.
+        /// </remarks>
+        public double ViscousJumpHeight { get; set; } = 1.02;
+
+        /// <summary>
+        /// The upward speed a jump of a given height needs, given the gravity in force.
+        /// </summary>
+        /// <remarks>
+        /// Straight from <c>v = sqrt(2gh)</c>. Keeping it as a function rather than a stored speed means
+        /// changing gravity cannot silently change how high anything jumps, which is the sort of coupling
+        /// that turns one tuning pass into three.
+        /// </remarks>
+        public double SpeedForHeight(double height) => System.Math.Sqrt(2.0 * Gravity * System.Math.Max(0.0, height));
+
+        /// <summary>Upward speed imparted by a jump from dry ground.</summary>
+        public double JumpSpeed => SpeedForHeight(JumpHeight);
 
         /// <summary>How long after leaving the ground a jump still works.</summary>
         public double CoyoteTime { get; set; } = 0.12;
@@ -321,6 +360,37 @@ namespace RP.Game.Voxels
         /// <summary>How dense that fluid is relative to water. Above 1 the body sinks in it.</summary>
         public double FluidDensity { get; private set; } = 1.0;
 
+        /// <summary>
+        /// How thick the fluid the body is in is: 1 for water, higher for oil, lava and tar.
+        /// </summary>
+        /// <remarks>
+        /// Taken from the fluid's own tick delay, which is already the game's measure of how sluggishly a
+        /// fluid moves. Deriving it rather than declaring a second number means a fluid cannot be defined
+        /// as creeping across the ground while behaving like water around your knees.
+        /// </remarks>
+        public double FluidViscosity { get; private set; } = 1.0;
+
+        /// <summary>
+        /// How high the body can jump from where it is standing, in blocks.
+        /// </summary>
+        /// <remarks>
+        /// Thin fluids cost half a block, thick ones a whole one, and the crossover is gradual rather than
+        /// a cliff so that a fluid added later lands somewhere sensible without being special-cased here.
+        /// </remarks>
+        public double CurrentJumpHeight
+        {
+            get
+            {
+                if (!InFluid) return JumpHeight;
+                if (FluidViscosity <= 1.0) return WaterJumpHeight;
+
+                // Fully thick by the time a fluid is three times water's sluggishness, which is where lava
+                // and everything slower than it sits.
+                double thickness = System.Math.Min(1.0, (FluidViscosity - 1.0) / 2.0);
+                return WaterJumpHeight + ((ViscousJumpHeight - WaterJumpHeight) * thickness);
+            }
+        }
+
         /// <summary>Whether the body's head is under the surface — the condition for drowning.</summary>
         /// <remarks>
         /// Tested at eye height rather than at the body's centre, because what a player understands is
@@ -331,6 +401,15 @@ namespace RP.Game.Voxels
 
         /// <summary>How much of the body is below the surface, in <c>[0, 1]</c>. Drives buoyancy.</summary>
         public double Submersion { get; private set; }
+
+        /// <summary>
+        /// Whether the body is on the way up from a jump it made itself.
+        /// </summary>
+        /// <remarks>
+        /// Distinguishes "rising because I jumped" from "rising because I am buoyant", which the vertical
+        /// velocity alone cannot. Only the first should be ballistic.
+        /// </remarks>
+        private bool _jumpAscent;
 
         private double _maxBreath = 15.0;
         private double _breath = 15.0;
@@ -444,30 +523,69 @@ namespace RP.Game.Voxels
                 // much of the body is actually under. A body floats in water, bobs on oil, and sinks
                 // steadily in tar -- all from one number the game supplies per fluid, with no special cases
                 // in here.
-                double displaced = FluidDensity * Submersion;
-                double buoyancy = (displaced - BodyDensity) * Gravity * BuoyancyStrength;
+                // Standing on the bottom is standing on the ground, and you can jump off it. Wading
+                // through a stream and finding the jump button does nothing is the wrong answer: it reads
+                // as the controls having broken rather than as the water being heavy. What a fluid takes
+                // is height, not the jump itself.
+                if (_jumpBufferTimer > 0.0 && _coyoteTimer > 0.0)
+                {
+                    vy = SpeedForHeight(CurrentJumpHeight);
+                    _coyoteTimer = 0.0;
+                    _jumpBufferTimer = 0.0;
+                    _jumpAscent = true;
+                }
+                else if (jump && !_jumpAscent)
+                {
+                    // Swimming up, for a body already off the bottom. Weaker than a jump: you cannot leap
+                    // out of deep water, you climb out.
+                    vy = System.Math.Min(vy + (Gravity * 0.55 * dt), 4.2);
+                }
 
-                vy += buoyancy * dt;
-                vy -= Gravity * dt * (1.0 - Submersion);   // the part still in air falls normally
+                if (_jumpAscent)
+                {
+                    // The ascent of a jump is ballistic even in fluid, so that CurrentJumpHeight is a
+                    // promise rather than an optimistic ceiling. Solving drag and buoyancy backwards for
+                    // an impulse that happens to land on the right height would be arithmetic nobody could
+                    // check, and it would drift the moment either constant moved.
+                    vy -= Gravity * dt;
+                }
+                else
+                {
+                    // Buoyancy is the difference between the fluid's density and the body's, scaled by how
+                    // much of the body is actually under. A body floats in water, bobs on oil, and sinks
+                    // steadily in tar -- all from one number the game supplies per fluid, with no special
+                    // cases in here.
+                    double displaced = FluidDensity * Submersion;
+                    double buoyancy = (displaced - BodyDensity) * Gravity * BuoyancyStrength;
 
-                // Swimming up. Weaker than a jump: a body cannot leap out of water, it climbs out.
-                if (jump) vy = System.Math.Min(vy + (Gravity * 0.55 * dt), 4.2);
+                    vy += buoyancy * dt;
+                    vy -= Gravity * dt * (1.0 - Submersion);   // the part still in air falls normally
 
-                // Drag, which is what makes a fluid feel thick. Scales with density, so tar is treacle.
-                double drag = 2.4 * FluidDensity;
-                vy *= 1.0 - System.Math.Min(drag * dt, 0.9);
+                    // Drag, which is what makes a fluid feel thick. Scales with density, so tar is
+                    // treacle, and with submersion, because a body with its ankles wet is not swimming.
+                    // Without that second factor a shallow stream damps a jump as hard as a deep lake and
+                    // wading across a brook feels like wading through the sea.
+                    double drag = 2.4 * FluidDensity * System.Math.Max(0.15, Submersion);
+                    vy *= 1.0 - System.Math.Min(drag * dt, 0.9);
+                }
             }
             else
             {
                 if (_jumpBufferTimer > 0.0 && _coyoteTimer > 0.0)
                 {
+                    // No gravity on the frame the impulse lands. Taking a frame's worth off immediately
+                    // costs a fixed slice of the jump and makes the height depend on the timestep, so the
+                    // same jump clears a ledge at 144 frames a second and does not at 30.
                     vy = JumpSpeed;
                     _coyoteTimer = 0.0;
                     _jumpBufferTimer = 0.0;
+                    _jumpAscent = true;
                 }
-
-                vy -= Gravity * dt;
-                if (vy < -TerminalVelocity) vy = -TerminalVelocity;
+                else
+                {
+                    vy -= Gravity * dt;
+                    if (vy < -TerminalVelocity) vy = -TerminalVelocity;
+                }
             }
 
             Velocity = new Vector3d(vx, vy, vz);
@@ -520,6 +638,11 @@ namespace RP.Game.Voxels
 
             OnGround = result.Landed || VoxelCollision.IsSupported(world, min, size);
             if (OnGround) _coyoteTimer = CoyoteTime;
+
+            // The ascent ends at the top of the arc, when the ceiling stops it, or when the feet are back
+            // on something. After that the body is subject to whatever it is standing or floating in
+            // again, which is what lets a jump in water turn into a float rather than a stone's descent.
+            if (_jumpAscent && (vy <= 0.0 || OnGround)) _jumpAscent = false;
         }
 
         /// <summary>Free flight: no gravity, no collision, and the up/down controls move vertically.</summary>
@@ -539,6 +662,7 @@ namespace RP.Game.Voxels
             Position += Velocity * dt;
             OnGround = false;
             InFluid = false;
+            _jumpAscent = false;
         }
 
         /// <summary>
@@ -605,6 +729,7 @@ namespace RP.Game.Voxels
             {
                 Submersion = 0.0;
                 FluidDensity = 1.0;
+                FluidViscosity = 1.0;
                 FluidSurfaceHeight = double.NegativeInfinity;
                 IsHeadSubmerged = false;
                 return;
@@ -630,6 +755,7 @@ namespace RP.Game.Voxels
 
             IsHeadSubmerged = Position.Y + EyeHeight < FluidSurfaceHeight;
             FluidDensity = Fluids != null ? Fluids.FluidDensity(kind) : 1.0;
+            FluidViscosity = Fluids != null ? System.Math.Max(1, Fluids.FluidTickDelay(kind)) : 1.0;
         }
 
         /// <summary>The world-space height of the fluid surface in this column, or negative infinity in air.</summary>

@@ -299,25 +299,170 @@ namespace RP.Game.Tests.Voxels
             character.Position.X.Should().BeLessThan(3.0, "there is nowhere to stand on the step");
         }
 
-        [TestMethod]
-        public void Character_JumpClearsExactlyOneBlock()
+        /// <summary>
+        /// Jumps once from a standing start and reports how high the body got, in blocks.
+        /// </summary>
+        private static double JumpHeightOf(VoxelCharacter character, VoxelVolume world, Vector3d wish = default)
         {
-            // The whole world is built in multiples of one block, so the jump has to clear one and not two.
+            const double Dt = 1.0 / 60.0;
+            Simulate(character, world, 1.0, wish: wish);   // settle, and reach walking speed
+
+            double floor = character.Position.Y;
+            double peak = floor;
+
+            for (int i = 0; i < 180; i++)
+            {
+                character.Step(world, Dt, wish, jump: i < 2, sprint: false);
+                if (character.Position.Y > peak) peak = character.Position.Y;
+                if (i > 4 && character.OnGround) break;
+            }
+
+            return peak - floor;
+        }
+
+        [TestMethod]
+        public void Character_JumpClearsTwoBlocks()
+        {
+            // The world is built in multiples of one block, so the jump is stated in them. Two, because a
+            // player navigating terrain asks "can I get onto that?" and the answer should be yes for a
+            // two-high step and no for a three-high one -- a wall you have to build stairs for.
             VoxelVolume world = WorldWithFloor();
+            VoxelCharacter character = NewCharacter(world, new Vector3d(0, 1, 0));
+
+            double height = JumpHeightOf(character, world);
+
+            height.Should().BeGreaterThan(2.0, "a jump must clear a two-block ledge");
+            height.Should().BeLessThan(3.0, "but not a three-block one");
+        }
+
+        [TestMethod]
+        public void Character_CanActuallyLandOnATwoBlockLedge()
+        {
+            // Apex height is necessary and not sufficient: the body also has to travel far enough forward
+            // while it is up there. A jump that reaches two blocks straight up and stalls is a jump a
+            // player cannot use to get anywhere.
+            VoxelVolume world = WorldWithFloor();
+            world.FillBox(new BlockPos(3, 1, -8), new BlockPos(20, 2, 8), PhysicsPalette.Stone);
+
+            VoxelCharacter character = NewCharacter(world, new Vector3d(-4, 1, 0));
+            const double Dt = 1.0 / 60.0;
+            var forward = new Vector3d(1, 0, 0);
+
+            // Walk into the ledge first, the way a player does: two blocks is above the step-up height, so
+            // the body comes to a stop against it and the jump starts from there rather than from a
+            // standstill four blocks back.
+            for (int i = 0; i < 240; i++) character.Step(world, Dt, forward, false, false);
+            character.Position.X.Should().BeApproximately(2.7, 0.05, "stopped against the face of the ledge");
+
+            for (int i = 0; i < 180; i++) character.Step(world, Dt, forward, jump: i < 2, sprint: false);
+
+            character.Position.Y.Should().BeApproximately(3.0, 1e-2, "the body should be standing on the ledge");
+            character.Position.X.Should().BeGreaterThan(3.0);
+        }
+
+        [TestMethod]
+        public void Character_CanChangeDirectionInMidAir()
+        {
+            // "Jump two blocks and move forward or backward." Air control has to be enough to matter and
+            // not so much that a jump stops being a commitment.
+            VoxelVolume world = WorldWithFloor();
+
+            VoxelCharacter forward = NewCharacter(world, new Vector3d(0, 1, 0));
+            VoxelCharacter backward = NewCharacter(world, new Vector3d(0, 1, 8));
+
+            const double Dt = 1.0 / 60.0;
+            for (int i = 0; i < 90; i++)
+            {
+                forward.Step(world, Dt, new Vector3d(1, 0, 0), jump: i < 2, sprint: false);
+                backward.Step(world, Dt, new Vector3d(-1, 0, 0), jump: i < 2, sprint: false);
+            }
+
+            forward.Position.X.Should().BeGreaterThan(1.5, "a jump carries you forward");
+            backward.Position.X.Should().BeLessThan(-1.5, "and backward just as readily");
+        }
+
+        [TestMethod]
+        public void Character_JumpsLowerStandingInWater()
+        {
+            // Half a block off the top. Enough to notice at once -- a ledge you were hopping onto a moment
+            // ago is out of reach -- without making a shallow stream into a wall.
+            VoxelVolume world = WorldWithFloor();
+            world.FillBox(new BlockPos(-16, 1, -16), new BlockPos(16, 1, 16), PhysicsPalette.WaterSource);
+
+            VoxelCharacter character = NewCharacter(world, new Vector3d(0, 1, 0));
+            double height = JumpHeightOf(character, world);
+
+            height.Should().BeInRange(1.35, 1.8, "about a block and a half");
+        }
+
+        [TestMethod]
+        public void Character_JumpsLowerStillStandingInSomethingThick()
+        {
+            // One block, and no more. Wading into tar should feel like a decision: you can climb out of a
+            // one-deep channel and you cannot bound out of a pit you walked into.
+            VoxelVolume world = WorldWithFloor();
+            world.FillBox(new BlockPos(-16, 1, -16), new BlockPos(16, 1, 16), PhysicsPalette.TarSource);
+
+            VoxelCharacter character = NewCharacter(world, new Vector3d(0, 1, 0));
+            double height = JumpHeightOf(character, world);
+
+            height.Should().BeInRange(0.85, 1.25, "about one block");
+        }
+
+        [TestMethod]
+        public void Character_ThickerFluidsNeverJumpHigherThanThinnerOnes()
+        {
+            // The ordering is the promise; the exact numbers are tuning. A fluid added later has to land
+            // somewhere sensible without being special-cased in the controller, and it does because the
+            // height comes from the fluid's own tick delay rather than from a table of names.
+            double Height(ushort fluid)
+            {
+                VoxelVolume pool = WorldWithFloor();
+                if (fluid != PhysicsPalette.Air) pool.FillBox(new BlockPos(-16, 1, -16), new BlockPos(16, 1, 16), fluid);
+                return JumpHeightOf(NewCharacter(pool, new Vector3d(0, 1, 0)), pool);
+            }
+
+            double dry = Height(PhysicsPalette.Air);
+            double water = Height(PhysicsPalette.WaterSource);
+            double tar = Height(PhysicsPalette.TarSource);
+
+            dry.Should().BeGreaterThan(water);
+            water.Should().BeGreaterThan(tar);
+        }
+
+        [TestMethod]
+        public void Character_DoesNotJumpOutOfLavaBecauseItIsFloatingOnIt()
+        {
+            // Lava is three times the density of water, so a body does not stand in it to push off -- it
+            // rides on top. That is not a missing jump, it is the buoyancy model being right, and the
+            // ordering test above deliberately leaves lava out for exactly this reason.
+            VoxelVolume world = WorldWithFloor();
+            world.FillBox(new BlockPos(-16, 1, -16), new BlockPos(16, 4, 16), PhysicsPalette.LavaSource);
+
+            VoxelCharacter character = NewCharacter(world, new Vector3d(0, 1, 0));
+            Simulate(character, world, 3.0);
+
+            character.OnGround.Should().BeFalse("nothing is holding it up but the lava");
+            character.Position.Y.Should().BeGreaterThan(2.0, "it has risen toward the surface");
+        }
+
+        [TestMethod]
+        public void Character_CanStillJumpOutOfAShallowStream()
+        {
+            // The bug this replaced: standing ankle-deep in water, the jump button did nothing at all,
+            // because being in fluid at all switched the controller into swimming. That reads as the
+            // controls having broken rather than as the water being heavy.
+            VoxelVolume world = WorldWithFloor();
+            world.FillBox(new BlockPos(-16, 1, -16), new BlockPos(16, 1, 16), PhysicsPalette.WaterSource);
+            world.FillBox(new BlockPos(4, 1, -16), new BlockPos(16, 1, 16), PhysicsPalette.Stone);
+
             VoxelCharacter character = NewCharacter(world, new Vector3d(0, 1, 0));
             Simulate(character, world, 0.5);
 
-            double peak = character.Position.Y;
             const double Dt = 1.0 / 60.0;
-            for (int i = 0; i < 120; i++)
-            {
-                character.Step(world, Dt, default, jump: i < 2, sprint: false);
-                if (character.Position.Y > peak) peak = character.Position.Y;
-            }
+            for (int i = 0; i < 180; i++) character.Step(world, Dt, new Vector3d(1, 0, 0), jump: i < 2, sprint: false);
 
-            double height = peak - 1.0;
-            height.Should().BeGreaterThan(1.05, "a jump must clear a one-block ledge");
-            height.Should().BeLessThan(2.0, "but not a two-block one");
+            character.Position.Y.Should().BeApproximately(2.0, 1e-2, "out of the stream and onto the bank");
         }
 
         [TestMethod]

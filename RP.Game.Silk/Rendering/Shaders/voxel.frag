@@ -24,7 +24,7 @@ layout(push_constant) uniform Push {
     vec4 camPos;        // xyz = camera in render space, w = fog density
     vec4 sunDir;        // xyz = unit direction toward the sun, w = daylight in [0,1]
     vec4 sunColor;      // rgb = sun colour, a = fog start distance
-    vec4 chunkOffset;   // xyz = chunk origin in render space, w = surface detail level (0..2)
+    vec4 chunkOffset;   // xyz = chunk origin in render space, w = detail (0..2) + 4 * submerged fluid (0..3)
 } pc;
 
 layout(location = 0) in vec3 vNormal;
@@ -121,7 +121,10 @@ void main()
     // noise fetch below is per-pixel over the whole screen, so this is the single biggest lever the
     // fragment shader has -- and at detail 0 the world is still perfectly readable, because the shape, the
     // ambient occlusion and the light grid are doing the real work.
-    float detailLevel = pc.chunkOffset.w;
+    // Two values packed into one float: the detail level in 0..2, with the submerged-fluid kind riding
+    // above it in steps of four. Taking them apart here rather than at each use keeps the packing in one
+    // place, where it can be changed without hunting for the other half of it.
+    float detailLevel = mod(pc.chunkOffset.w, 4.0);
     variation *= clamp(detailLevel * 0.5, 0.0, 1.0);
 
     vec3 N = normalize(vNormal);
@@ -283,6 +286,41 @@ void main()
     float fogDensity = pc.camPos.w;
     float fogDistance = max(distance - fogStart, 0.0) * fogDensity;
     float fog = 1.0 - exp(-fogDistance * fogDistance);
+
+    // ---- Under a fluid -------------------------------------------------------------------------------
+    //
+    // Being submerged is not fog. Fog tints toward the sky and brightens toward the sun, which under
+    // water produces a pale haze that reads as a spring morning rather than as being underneath
+    // something. What it has to do instead is absorb: the fluid has its own colour, that colour gets
+    // stronger with distance, and no amount of sunlight makes the far wall of a flooded cavern brighter.
+    //
+    // The three fluids are deliberately very different. Water is blue-green and you can see a fair way
+    // through it, because a player who cannot see is a player who drowns for reasons they cannot learn
+    // from. Lava is opaque and orange -- you are dead, and you should at least know why. Oil and tar are
+    // near-black, which is the entire hazard.
+    int submerged = int(pc.chunkOffset.w * 0.25);
+
+    if (submerged > 0)
+    {
+        vec3 fluidColor;
+        float absorb;
+
+        if (submerged == 1)       { fluidColor = vec3(0.09, 0.26, 0.34); absorb = 0.055; }
+        else if (submerged == 2)  { fluidColor = vec3(0.65, 0.18, 0.03); absorb = 0.900; }
+        else                      { fluidColor = vec3(0.02, 0.02, 0.03); absorb = 0.400; }
+
+        // Beer-Lambert rather than the squared ramp the distance fog uses. Absorption through a medium
+        // really is exponential in depth, and the squared form has a near-field shelf that makes the
+        // first few blocks suspiciously clear before everything beyond goes at once.
+        float murk = 1.0 - exp(-distance * absorb);
+
+        // The surface keeps a little of its own colour all the way out, so a wall of ore under water is
+        // still recognisably ore rather than a uniform sheet of blue.
+        vec3 drowned = mix(lit * mix(vec3(1.0), fluidColor * 2.2, 0.55), fluidColor, murk);
+
+        outColor = vec4(drowned, 1.0);
+        return;
+    }
 
     // Fog toward the sky in the direction we are actually looking, so it matches the backdrop behind it.
     vec3 viewDir = -V;
