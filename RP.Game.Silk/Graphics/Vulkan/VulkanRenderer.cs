@@ -1025,6 +1025,9 @@ namespace RP.Game.Graphics.Vulkan
             // it — a use-after-free that shows up as a random device-lost minutes into a session.
             DrainPendingFrees();
 
+            // Every chunk mesh uploaded since the last frame, in one submit rather than one each.
+            FlushChunkUploads();
+
             // 2. Acquire the next image to draw into. If the swapchain is out of date (e.g. the window
             //    resized), rebuild it and skip this frame.
             uint imageIndex = 0;

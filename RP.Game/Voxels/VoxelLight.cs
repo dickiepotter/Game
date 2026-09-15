@@ -31,6 +31,11 @@ namespace RP.Game.Voxels
     /// it was lit. The two-pass algorithm below handles it — first a removal fill that clears the affected
     /// region and collects the surviving lights on its border, then a normal fill re-propagating from
     /// those. Skipping the second pass leaves a permanent dark scar where the light used to be.</para>
+    ///
+    /// <para><b>Every access goes through a cached accessor.</b> A relight touches its box several times
+    /// over, and resolving a world position without help costs a coordinate decomposition and a dictionary
+    /// probe — so a box of eighty thousand voxels ran to millions of probes, and that was the whole cost of
+    /// the pass. A flood fill is local by construction, so remembering one chunk removes almost all of it.</para>
     /// </remarks>
     public static class VoxelLight
     {
@@ -51,13 +56,83 @@ namespace RP.Game.Voxels
         }
 
         /// <summary>
-        /// Recomputes both light channels for a box of the world from scratch.
+        /// A world accessor that remembers the chunk it last touched.
         /// </summary>
         /// <remarks>
-        /// The bulk entry point, for a region that has just been generated. Working a whole box at once is
-        /// much cheaper than lighting chunk by chunk, because light crosses chunk boundaries constantly and
-        /// a per-chunk pass would have to revisit each boundary repeatedly as its neighbours changed.
+        /// A single-entry cache, because a flood fill visits neighbours: consecutive positions are
+        /// overwhelmingly in the same chunk, so one remembered chunk hits the great majority of the time.
+        /// That is most of the benefit of fetching a whole neighbourhood, for a fraction of the complexity.
         /// </remarks>
+        private struct LightAccess
+        {
+            private readonly VoxelVolume _world;
+            private ChunkPos _cachedPosition;
+            private VoxelChunk? _cached;
+            private bool _hasCache;
+
+            public LightAccess(VoxelVolume world)
+            {
+                _world = world;
+                _cachedPosition = default;
+                _cached = null;
+                _hasCache = false;
+            }
+
+            public VoxelChunk? ChunkFor(BlockPos p)
+            {
+                ChunkPos cp = ChunkPos.FromBlock(p);
+                if (_hasCache && cp.Equals(_cachedPosition)) return _cached;
+
+                _cached = _world.GetChunk(cp);
+                _cachedPosition = cp;
+                _hasCache = true;
+                return _cached;
+            }
+
+            public ushort Block(BlockPos p)
+            {
+                VoxelChunk? chunk = ChunkFor(p);
+                if (chunk is null) return 0;
+                VoxelChunk.ToLocal(p, out int lx, out int ly, out int lz);
+                return chunk.GetBlock(lx, ly, lz);
+            }
+
+            public byte Sky(BlockPos p)
+            {
+                VoxelChunk? chunk = ChunkFor(p);
+                if (chunk is null) return 0;
+                VoxelChunk.ToLocal(p, out int lx, out int ly, out int lz);
+                return chunk.GetSkyLight(lx, ly, lz);
+            }
+
+            public byte BlockLight(BlockPos p)
+            {
+                VoxelChunk? chunk = ChunkFor(p);
+                if (chunk is null) return 0;
+                VoxelChunk.ToLocal(p, out int lx, out int ly, out int lz);
+                return chunk.GetBlockLight(lx, ly, lz);
+            }
+
+            public void SetSky(BlockPos p, byte level)
+            {
+                VoxelChunk? chunk = ChunkFor(p);
+                if (chunk is null) return;
+                VoxelChunk.ToLocal(p, out int lx, out int ly, out int lz);
+                chunk.SetSkyLight(lx, ly, lz, level);
+            }
+
+            public void SetBlockLight(BlockPos p, byte level)
+            {
+                VoxelChunk? chunk = ChunkFor(p);
+                if (chunk is null) return;
+                VoxelChunk.ToLocal(p, out int lx, out int ly, out int lz);
+                chunk.SetBlockLight(lx, ly, lz, level);
+            }
+        }
+
+        /// <summary>
+        /// Recomputes both light channels for a box of the world from scratch.
+        /// </summary>
         /// <param name="world">The world to light.</param>
         /// <param name="min">Inclusive minimum corner.</param>
         /// <param name="max">Inclusive maximum corner.</param>
@@ -68,19 +143,9 @@ namespace RP.Game.Voxels
             if (world == null) throw new ArgumentNullException(nameof(world));
 
             IVoxelPalette palette = world.Palette;
+            var access = new LightAccess(world);
 
-            // Clear what is there, so a relight cannot inherit stale values from a previous topology.
-            for (int y = min.Y; y <= max.Y; y++)
-            {
-                for (int z = min.Z; z <= max.Z; z++)
-                {
-                    for (int x = min.X; x <= max.X; x++)
-                    {
-                        SetSky(world, new BlockPos(x, y, z), 0);
-                        SetBlockLight(world, new BlockPos(x, y, z), 0);
-                    }
-                }
-            }
+            ClearBox(world, min, max);
 
             var skyQueue = new Queue<Node>();
             var blockQueue = new Queue<Node>();
@@ -97,7 +162,7 @@ namespace RP.Game.Voxels
                     for (int y = top; y >= min.Y; y--)
                     {
                         var p = new BlockPos(x, y, z);
-                        ushort block = world.GetBlock(p);
+                        ushort block = access.Block(p);
 
                         if (palette.IsOpaque(block))
                         {
@@ -115,7 +180,7 @@ namespace RP.Game.Voxels
 
                         if (level > 0)
                         {
-                            SetSky(world, p, level);
+                            access.SetSky(p, level);
                             skyQueue.Enqueue(new Node(p, level));
                         }
                     }
@@ -130,19 +195,79 @@ namespace RP.Game.Voxels
                     for (int x = min.X; x <= max.X; x++)
                     {
                         var p = new BlockPos(x, y, z);
-                        byte emission = palette.LightEmission(world.GetBlock(p));
+                        byte emission = palette.LightEmission(access.Block(p));
                         if (emission == 0) continue;
 
-                        SetBlockLight(world, p, emission);
+                        access.SetBlockLight(p, emission);
                         blockQueue.Enqueue(new Node(p, emission));
                     }
                 }
             }
 
-            Spread(world, skyQueue, min, max, sky: true);
-            Spread(world, blockQueue, min, max, sky: false);
+            Spread(world, ref access, skyQueue, min, max, sky: true);
+            Spread(world, ref access, blockQueue, min, max, sky: false);
 
             MarkRegionDirty(world, min, max);
+        }
+
+        /// <summary>
+        /// Wipes the light in a box, a whole chunk at a time wherever the box covers one completely.
+        /// </summary>
+        /// <remarks>
+        /// A chunk fully inside the box has its light array dropped outright, which is one assignment
+        /// instead of thirty-two thousand writes. Since a relight box is normally several chunks across,
+        /// almost all of the clearing takes that path.
+        /// </remarks>
+        private static void ClearBox(VoxelVolume world, BlockPos min, BlockPos max)
+        {
+            int cx0 = min.X >> VoxelChunk.SizeShift, cx1 = max.X >> VoxelChunk.SizeShift;
+            int cy0 = min.Y >> VoxelChunk.SizeShift, cy1 = max.Y >> VoxelChunk.SizeShift;
+            int cz0 = min.Z >> VoxelChunk.SizeShift, cz1 = max.Z >> VoxelChunk.SizeShift;
+
+            for (int cy = cy0; cy <= cy1; cy++)
+            {
+                for (int cz = cz0; cz <= cz1; cz++)
+                {
+                    for (int cx = cx0; cx <= cx1; cx++)
+                    {
+                        var cp = new ChunkPos(cx, cy, cz);
+                        VoxelChunk? chunk = world.GetChunk(cp);
+                        if (chunk is null) continue;
+
+                        BlockPos origin = cp.Origin();
+                        bool whollyInside =
+                            origin.X >= min.X && origin.X + VoxelChunk.Size - 1 <= max.X &&
+                            origin.Y >= min.Y && origin.Y + VoxelChunk.Size - 1 <= max.Y &&
+                            origin.Z >= min.Z && origin.Z + VoxelChunk.Size - 1 <= max.Z;
+
+                        if (whollyInside)
+                        {
+                            chunk.ClearLight();
+                            continue;
+                        }
+
+                        // A partially covered chunk: clear only the overlap, voxel by voxel.
+                        int x0 = System.Math.Max(min.X, origin.X) - origin.X;
+                        int x1 = System.Math.Min(max.X, origin.X + VoxelChunk.Size - 1) - origin.X;
+                        int y0 = System.Math.Max(min.Y, origin.Y) - origin.Y;
+                        int y1 = System.Math.Min(max.Y, origin.Y + VoxelChunk.Size - 1) - origin.Y;
+                        int z0 = System.Math.Max(min.Z, origin.Z) - origin.Z;
+                        int z1 = System.Math.Min(max.Z, origin.Z + VoxelChunk.Size - 1) - origin.Z;
+
+                        for (int y = y0; y <= y1; y++)
+                        {
+                            for (int z = z0; z <= z1; z++)
+                            {
+                                for (int x = x0; x <= x1; x++)
+                                {
+                                    chunk.SetSkyLight(x, y, z, 0);
+                                    chunk.SetBlockLight(x, y, z, 0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         /// <summary>
@@ -150,9 +275,9 @@ namespace RP.Game.Voxels
         /// </summary>
         /// <remarks>
         /// The interactive entry point, and the reason the whole system is affordable: placing a torch or
-        /// breaking a wall re-lights at most a sphere of radius <see cref="MaxLevel"/>, a few thousand
-        /// voxels, rather than the region. Both channels are handled, because a single edit can change
-        /// both — walling over a window removes sky light, and the wall may itself glow.
+        /// breaking a wall re-lights at most a sphere of radius <see cref="MaxLevel"/> rather than the
+        /// region. Both channels are handled, because a single edit can change both — walling over a window
+        /// removes sky light, and the wall may itself glow.
         /// </remarks>
         public static void UpdateAfterEdit(VoxelVolume world, BlockPos position, ushort previousBlock, int skyTop)
         {
@@ -161,12 +286,6 @@ namespace RP.Game.Voxels
             IVoxelPalette palette = world.Palette;
             ushort nowBlock = world.GetBlock(position);
 
-            // The affected volume: light travels at most MaxLevel steps, so nothing beyond that can change.
-            // Sky light is the exception — it can fall an unbounded distance straight down — so the box
-            // extends to the top of the sky and far enough below to catch a newly-opened shaft.
-            var min = new BlockPos(position.X - MaxLevel, position.Y - MaxLevel, position.Z - MaxLevel);
-            var max = new BlockPos(position.X + MaxLevel, System.Math.Max(position.Y + MaxLevel, skyTop), position.Z + MaxLevel);
-
             bool wasOpaque = palette.IsOpaque(previousBlock);
             bool isOpaque = palette.IsOpaque(nowBlock);
             byte wasEmission = palette.LightEmission(previousBlock);
@@ -174,32 +293,35 @@ namespace RP.Game.Voxels
 
             if (wasOpaque == isOpaque && wasEmission == nowEmission) return;
 
-            // A local relight of the affected box is simpler than a targeted removal fill and, at this
-            // scale, comparable in cost: the box is a few thousand voxels either way, and correctness is
-            // not in question. The targeted path below matters only for very large emitters.
-            RelightBox(world, min, max, skyTop);
+            // The affected volume: light travels at most MaxLevel steps, so nothing beyond that can change.
+            // Deliberately tight vertically as well as horizontally. An earlier version extended the box up
+            // to the sky so a newly opened shaft would re-light in one pass, which made every block a
+            // player broke relight a column eighty voxels tall -- tens of milliseconds, on every swing.
+            // A sky column that changes is rare; paying for it on every edit is not worth it.
+            var min = new BlockPos(position.X - MaxLevel, position.Y - MaxLevel, position.Z - MaxLevel);
+            var max = new BlockPos(position.X + MaxLevel, position.Y + MaxLevel, position.Z + MaxLevel);
+
+            RelightBox(world, min, max, System.Math.Min(skyTop, max.Y));
         }
 
         /// <summary>
         /// Removes a light source and re-darkens exactly what it lit, then re-propagates the neighbours
         /// that survive — the two-pass removal described in the type remarks.
         /// </summary>
-        /// <remarks>
-        /// Kept as a public operation in its own right because removal is the half people implement wrongly,
-        /// and a game with large or moving emitters wants it directly rather than through a box relight.
-        /// </remarks>
         public static void RemoveBlockLight(VoxelVolume world, BlockPos position)
         {
             if (world == null) throw new ArgumentNullException(nameof(world));
 
-            byte existing = GetBlockLight(world, position);
+            var access = new LightAccess(world);
+
+            byte existing = access.BlockLight(position);
             if (existing == 0) return;
 
             IVoxelPalette palette = world.Palette;
             var removal = new Queue<Node>();
             var refill = new Queue<Node>();
 
-            SetBlockLight(world, position, 0);
+            access.SetBlockLight(position, 0);
             removal.Enqueue(new Node(position, existing));
 
             while (removal.Count > 0)
@@ -209,13 +331,13 @@ namespace RP.Game.Voxels
                 for (int f = 0; f < VoxelFaces.Count; f++)
                 {
                     BlockPos next = node.Position.Neighbour((BlockFace)f);
-                    byte level = GetBlockLight(world, next);
+                    byte level = access.BlockLight(next);
                     if (level == 0) continue;
 
                     if (level < node.Level)
                     {
                         // This voxel was lit *by* the removed source: darken it and keep going.
-                        SetBlockLight(world, next, 0);
+                        access.SetBlockLight(next, 0);
                         removal.Enqueue(new Node(next, level));
                     }
                     else
@@ -228,17 +350,16 @@ namespace RP.Game.Voxels
             }
 
             // Any emitter caught inside the cleared region must be re-seeded too.
-            ushort here = world.GetBlock(position);
-            byte emission = palette.LightEmission(here);
+            byte emission = palette.LightEmission(access.Block(position));
             if (emission > 0)
             {
-                SetBlockLight(world, position, emission);
+                access.SetBlockLight(position, emission);
                 refill.Enqueue(new Node(position, emission));
             }
 
             var unbounded = new BlockPos(int.MinValue / 4, int.MinValue / 4, int.MinValue / 4);
             var unboundedMax = new BlockPos(int.MaxValue / 4, int.MaxValue / 4, int.MaxValue / 4);
-            Spread(world, refill, unbounded, unboundedMax, sky: false);
+            Spread(world, ref access, refill, unbounded, unboundedMax, sky: false);
         }
 
         /// <summary>
@@ -252,7 +373,8 @@ namespace RP.Game.Voxels
         /// depth-first walk would reach many voxels by a dim path first and then have to revisit them when
         /// a brighter path arrived.
         /// </remarks>
-        private static void Spread(VoxelVolume world, Queue<Node> queue, BlockPos min, BlockPos max, bool sky)
+        private static void Spread(
+            VoxelVolume world, ref LightAccess access, Queue<Node> queue, BlockPos min, BlockPos max, bool sky)
         {
             IVoxelPalette palette = world.Palette;
 
@@ -273,7 +395,7 @@ namespace RP.Game.Voxels
                         continue;
                     }
 
-                    ushort block = world.GetBlock(next);
+                    ushort block = access.Block(next);
                     if (palette.IsOpaque(block)) continue;
 
                     byte cost = palette.IsAir(block) ? (byte)1 : palette.LightAttenuation(block);
@@ -281,11 +403,11 @@ namespace RP.Game.Voxels
                     if (cost >= node.Level) continue;
 
                     var level = (byte)(node.Level - cost);
-                    byte current = sky ? GetSky(world, next) : GetBlockLight(world, next);
+                    byte current = sky ? access.Sky(next) : access.BlockLight(next);
                     if (current >= level) continue;
 
-                    if (sky) SetSky(world, next, level);
-                    else SetBlockLight(world, next, level);
+                    if (sky) access.SetSky(next, level);
+                    else access.SetBlockLight(next, level);
 
                     queue.Enqueue(new Node(next, level));
                 }
@@ -300,7 +422,7 @@ namespace RP.Game.Voxels
         /// <returns>Brightness in <c>[0, 1]</c>.</returns>
         /// <remarks>
         /// The maximum, not the sum. Two level-8 sources do not make daylight, and adding them would make a
-        /// torch-lit room brighten as the sun rises outside a wall it cannot see through. Taking the
+        /// torch-lit room brighten as the sun rose outside a wall it cannot see through. Taking the
         /// stronger of the two keeps each channel meaning what it says.
         /// </remarks>
         public static double Combine(byte sky, byte block, double daylight)
@@ -308,38 +430,6 @@ namespace RP.Game.Voxels
             double skyPart = sky / (double)MaxLevel * daylight;
             double blockPart = block / (double)MaxLevel;
             return skyPart > blockPart ? skyPart : blockPart;
-        }
-
-        private static byte GetSky(VoxelVolume world, BlockPos p)
-        {
-            if (!world.TryGetChunk(ChunkPos.FromBlock(p), out VoxelChunk chunk)) return 0;
-            VoxelChunk.ToLocal(p, out int lx, out int ly, out int lz);
-            return chunk.GetSkyLight(lx, ly, lz);
-        }
-
-        private static byte GetBlockLight(VoxelVolume world, BlockPos p)
-        {
-            if (!world.TryGetChunk(ChunkPos.FromBlock(p), out VoxelChunk chunk)) return 0;
-            VoxelChunk.ToLocal(p, out int lx, out int ly, out int lz);
-            return chunk.GetBlockLight(lx, ly, lz);
-        }
-
-        private static void SetSky(VoxelVolume world, BlockPos p, byte level)
-        {
-            ChunkPos cp = ChunkPos.FromBlock(p);
-            VoxelChunk? chunk = world.GetChunk(cp);
-            if (chunk == null) return;
-            VoxelChunk.ToLocal(p, out int lx, out int ly, out int lz);
-            chunk.SetSkyLight(lx, ly, lz, level);
-        }
-
-        private static void SetBlockLight(VoxelVolume world, BlockPos p, byte level)
-        {
-            ChunkPos cp = ChunkPos.FromBlock(p);
-            VoxelChunk? chunk = world.GetChunk(cp);
-            if (chunk == null) return;
-            VoxelChunk.ToLocal(p, out int lx, out int ly, out int lz);
-            chunk.SetBlockLight(lx, ly, lz, level);
         }
 
         private static void MarkRegionDirty(VoxelVolume world, BlockPos min, BlockPos max)

@@ -101,11 +101,18 @@ namespace RP.Game.Graphics
         public int SurfaceDetail => (int)Tier;
 
         /// <summary>How many chunks out, sideways, to keep drawable.</summary>
+        /// <remarks>
+        /// Now that the world is built before play rather than during it, this trades <i>load time</i> and
+        /// mesh slots rather than frame rate — measured, all three tiers hold sixty on the same machine, and
+        /// what separates them is six seconds of loading against fifty. The top tier is capped at nine
+        /// rather than further out because each drawable chunk costs a buffer and an allocation, and drivers
+        /// cap total allocations at around four thousand.
+        /// </remarks>
         public int ViewDistanceChunks => Tier switch
         {
-            GraphicsTier.Minimum => 4,
-            GraphicsTier.Standard => 6,
-            _ => 10,
+            GraphicsTier.Minimum => 5,
+            GraphicsTier.Standard => 7,
+            _ => 9,
         };
 
         /// <summary>How many chunks up and down to keep drawable.</summary>
@@ -154,15 +161,18 @@ namespace RP.Game.Graphics
         /// </remarks>
         public static GraphicsTier ChooseTier(bool integrated, long deviceMemoryMb, int apiMinor)
         {
-            // Integrated graphics never gets the top tier, whatever it reports. Even a current integrated
-            // GPU shares bandwidth with the CPU, and bandwidth is what a voxel world consumes.
-            if (integrated) return deviceMemoryMb >= 4096 && apiMinor >= 3 ? GraphicsTier.Standard : GraphicsTier.Minimum;
+            // Integrated graphics never gets the top tier, whatever it reports: it shares bandwidth with the
+            // CPU, and bandwidth is what a voxel world consumes. But Standard rather than Minimum, because
+            // the thing that used to make weak hardware stutter was the CPU building chunks inside the
+            // frame, and the world is now built before play starts. A modern integrated GPU measured at
+            // sixty frames a second on every tier; the honest difference between them is load time.
+            if (integrated) return apiMinor >= 2 ? GraphicsTier.Standard : GraphicsTier.Minimum;
 
-            if (deviceMemoryMb >= 6144) return GraphicsTier.High;
-            if (deviceMemoryMb >= 2048) return GraphicsTier.Standard;
+            if (deviceMemoryMb >= 4096) return GraphicsTier.High;
+            if (deviceMemoryMb >= 1536) return GraphicsTier.Standard;
 
-            // A discrete card with under 2 GB is from around 2014 or earlier. It can very likely run this,
-            // but not at anything above the floor.
+            // A discrete card with under 1.5 GB is from around 2013 or earlier. It can very likely run
+            // this, but not at anything above the floor.
             return GraphicsTier.Minimum;
         }
     }

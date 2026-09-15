@@ -24,7 +24,7 @@ layout(push_constant) uniform Push {
     vec4 camPos;        // xyz = camera in render space, w = fog density
     vec4 sunDir;        // xyz = unit direction toward the sun, w = daylight in [0,1]
     vec4 sunColor;      // rgb = sun colour, a = fog start distance
-    vec4 chunkOffset;
+    vec4 chunkOffset;   // xyz = chunk origin in render space, w = surface detail level (0..2)
 } pc;
 
 layout(location = 0) in vec3 vNormal;
@@ -117,6 +117,13 @@ void main()
     uint surface = (vMaterial >> 24) & 0x7u;
     float variation = float((vMaterial >> 27) & 0x1Fu) / 31.0;
 
+    // The quality tier scales the procedural detail down, and at the bottom removes it entirely. Every
+    // noise fetch below is per-pixel over the whole screen, so this is the single biggest lever the
+    // fragment shader has -- and at detail 0 the world is still perfectly readable, because the shape, the
+    // ambient occlusion and the light grid are doing the real work.
+    float detailLevel = pc.chunkOffset.w;
+    variation *= clamp(detailLevel * 0.5, 0.0, 1.0);
+
     vec3 N = normalize(vNormal);
     vec3 toCam = pc.camPos.xyz - vWorldPos;
     float distance = length(toCam);
@@ -129,8 +136,13 @@ void main()
     // Sampled in *world* space, not UV space. That matters twice over: a greedy-merged quad covering 32
     // blocks gets 32 blocks of detail rather than one stretched cell, and two adjacent blocks of the same
     // material line up seamlessly instead of each restarting the pattern.
-    float grain;
-    if (surface == SURFACE_GRANULAR)
+    float grain = 0.5;
+    if (variation <= 0.0)
+    {
+        // No detail wanted: skip every noise fetch and every derivative. This is the whole point of the
+        // bottom tier.
+    }
+    else if (surface == SURFACE_GRANULAR)
     {
         grain = detailNoise(vWorldPos * 9.0);            // fine speckle: sand, gravel, snow
     }

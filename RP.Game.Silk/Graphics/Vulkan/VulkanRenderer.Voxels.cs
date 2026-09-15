@@ -42,10 +42,12 @@ namespace RP.Game.Graphics.Vulkan
     {
         /// <summary>How many chunk meshes may be resident at once.</summary>
         /// <remarks>
-        /// 1,024 chunks is a view distance of roughly 8 chunks horizontally with 8 vertical, which is what
-        /// an integrated GPU will sustain at one draw call each. Raising it wants the sub-allocator first.
+        /// Each resident mesh costs one buffer and one device allocation, and drivers commonly cap total
+        /// allocations at around four thousand — so this is bounded by allocation count rather than by
+        /// memory or by draw calls. Raising it much further wants the sub-allocator the buffer code has
+        /// always flagged; 1,600 covers a nine-chunk view distance with room to spare.
         /// </remarks>
-        public const int MaxChunkMeshes = 1024;
+        public const int MaxChunkMeshes = 1600;
 
         private struct ChunkSlot
         {
@@ -68,6 +70,17 @@ namespace RP.Game.Graphics.Vulkan
         private readonly Dictionary<ChunkPos, int> _chunkSlotByPosition = new Dictionary<ChunkPos, int>();
         private readonly Stack<int> _freeChunkSlots = new Stack<int>();
         private readonly List<PendingFree> _pendingFrees = new List<PendingFree>();
+
+        /// <summary>A staging buffer waiting to be copied into its chunk's device-local buffer.</summary>
+        private struct PendingUpload
+        {
+            public Buffer Staging;
+            public DeviceMemory StagingMemory;
+            public Buffer Destination;
+            public ulong Size;
+        }
+
+        private readonly List<PendingUpload> _pendingUploads = new List<PendingUpload>();
 
         private Pipeline _voxelPipeline;
         private PipelineLayout _voxelPipelineLayout;
@@ -198,9 +211,17 @@ namespace RP.Game.Graphics.Vulkan
                 BufferUsageFlags.TransferDstBit | BufferUsageFlags.VertexBufferBit | BufferUsageFlags.IndexBufferBit,
                 MemoryPropertyFlags.DeviceLocalBit);
 
-            CopyBuffer(staging, buffer, total);
-            _vk.DestroyBuffer(_device, staging, null);
-            _vk.FreeMemory(_device, stagingMemory, null);
+            // Queued, not copied. Performing the copy here means a command buffer, a submit and a full
+            // queue drain *per chunk* -- and the streamer uploads several chunks a frame, so that is
+            // several complete GPU stalls every frame, which is exactly the stutter it was trying to avoid.
+            // FlushChunkUploads does them all in one submit at the top of the frame instead.
+            _pendingUploads.Add(new PendingUpload
+            {
+                Staging = staging,
+                StagingMemory = stagingMemory,
+                Destination = buffer,
+                Size = total,
+            });
 
             BlockPos origin = position.Origin();
             _chunkSlots[slot] = new ChunkSlot
@@ -246,6 +267,65 @@ namespace RP.Game.Graphics.Vulkan
 
         /// <summary>Whether a chunk currently has a resident mesh.</summary>
         public bool HasChunkMesh(ChunkPos position) => _chunkSlotByPosition.ContainsKey(position);
+
+        /// <summary>
+        /// Performs every queued chunk upload in one command buffer, one submit and one wait.
+        /// </summary>
+        /// <remarks>
+        /// The cost of a staging upload is dominated by the round trip, not by the bytes: submitting and
+        /// waiting costs the same whether it moves one chunk or forty. Batching turns a per-chunk stall
+        /// into one per frame, and a frame that uploads nothing pays nothing at all.
+        /// </remarks>
+        private void FlushChunkUploads()
+        {
+            if (_pendingUploads.Count == 0) return;
+
+            var allocInfo = new CommandBufferAllocateInfo
+            {
+                SType = StructureType.CommandBufferAllocateInfo,
+                Level = CommandBufferLevel.Primary,
+                CommandPool = _commandPool,
+                CommandBufferCount = 1,
+            };
+            _vk.AllocateCommandBuffers(_device, in allocInfo, out CommandBuffer cb);
+
+            var beginInfo = new CommandBufferBeginInfo
+            {
+                SType = StructureType.CommandBufferBeginInfo,
+                Flags = CommandBufferUsageFlags.OneTimeSubmitBit,
+            };
+            _vk.BeginCommandBuffer(cb, in beginInfo);
+
+            for (int i = 0; i < _pendingUploads.Count; i++)
+            {
+                PendingUpload upload = _pendingUploads[i];
+                var copy = new BufferCopy { Size = upload.Size };
+                _vk.CmdCopyBuffer(cb, upload.Staging, upload.Destination, 1, in copy);
+            }
+
+            _vk.EndCommandBuffer(cb);
+
+            var submit = new SubmitInfo
+            {
+                SType = StructureType.SubmitInfo,
+                CommandBufferCount = 1,
+                PCommandBuffers = &cb,
+            };
+            _vk.QueueSubmit(_graphicsQueue, 1, in submit, default);
+            _vk.QueueWaitIdle(_graphicsQueue);
+            _vk.FreeCommandBuffers(_device, _commandPool, 1, in cb);
+
+            // The staging buffers have served their purpose the moment the copy has completed, and the wait
+            // above guarantees that.
+            for (int i = 0; i < _pendingUploads.Count; i++)
+            {
+                PendingUpload upload = _pendingUploads[i];
+                _vk.DestroyBuffer(_device, upload.Staging, null);
+                _vk.FreeMemory(_device, upload.StagingMemory, null);
+            }
+
+            _pendingUploads.Clear();
+        }
 
         /// <summary>Sets up the slot free-list. Called once at construction.</summary>
         private void CreateChunkSlots()
@@ -554,7 +634,9 @@ namespace RP.Game.Graphics.Vulkan
                 chunkPush[0] = (float)ox;
                 chunkPush[1] = (float)oy;
                 chunkPush[2] = (float)oz;
-                chunkPush[3] = 0f;
+                // The spare slot in the per-chunk constant carries the detail level, so the fragment shader
+                // can skip its noise entirely on hardware that asked for less.
+                chunkPush[3] = Capabilities.SurfaceDetail;
 
                 _vk.CmdPushConstants(
                     cb, _voxelPipelineLayout,
@@ -584,6 +666,14 @@ namespace RP.Game.Graphics.Vulkan
                 if (slot.Memory.Handle != 0) _vk.FreeMemory(_device, slot.Memory, null);
                 slot = default;
             }
+
+            foreach (PendingUpload upload in _pendingUploads)
+            {
+                if (upload.Staging.Handle != 0) _vk.DestroyBuffer(_device, upload.Staging, null);
+                if (upload.StagingMemory.Handle != 0) _vk.FreeMemory(_device, upload.StagingMemory, null);
+            }
+
+            _pendingUploads.Clear();
 
             foreach (PendingFree pending in _pendingFrees)
             {
