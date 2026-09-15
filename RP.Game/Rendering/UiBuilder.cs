@@ -268,12 +268,48 @@ namespace RP.Game.Rendering
 
         /// <summary>Converts a pixel position, measured from the top-left, into normalised device coordinates.</summary>
         /// <remarks>
-        /// The Y flip is the part worth stating: pixels grow downward and NDC grows upward, so an interface
-        /// built without the negation comes out mirrored vertically — which reads as "the whole interface is
-        /// upside down" and is diagnosed in seconds, unlike the subtler failure of getting the aspect
-        /// correction wrong.
+        /// <para>There is <b>no Y flip</b>, and that is the part worth stating, because the instinct is to
+        /// add one. It is the right instinct for OpenGL, whose clip space has +Y upward; Vulkan's has +Y
+        /// <i>downward</i>, which is the same direction pixels grow. Negating here as well flips the
+        /// interface upside down — the hotbar draws along the top edge and every glyph stands on its head.
+        /// It is obvious the moment anyone looks at the screen and invisible to anything that does not,
+        /// which is precisely how it survives a test suite.</para>
+        /// <para>This is also the convention <see cref="GlyphFont"/> documents and assumes, and the one
+        /// <see cref="TryProjectWorld"/> produces, so all three agree.</para>
         /// </remarks>
         public Vector2 ToNdc(float x, float y)
-            => new Vector2(((x / ScreenWidth) * 2f) - 1f, 1f - ((y / ScreenHeight) * 2f));
+            => new Vector2(((x / ScreenWidth) * 2f) - 1f, ((y / ScreenHeight) * 2f) - 1f);
+
+        /// <summary>
+        /// Projects a world position into screen pixels, for drawing overlay marks on things in the world.
+        /// </summary>
+        /// <param name="viewProjection">The camera's Vulkan-corrected view-projection.</param>
+        /// <param name="world">The point, in the same space the camera is in.</param>
+        /// <param name="x">Screen x in pixels.</param>
+        /// <param name="y">Screen y in pixels.</param>
+        /// <returns>False if the point is behind the camera, where a projection is meaningless.</returns>
+        /// <remarks>
+        /// The behind-the-camera test is why this does the divide itself rather than using the matrix's own
+        /// transform: a point behind the eye has a negative homogeneous w, and dividing by it mirrors the
+        /// point through the origin. The result lands somewhere plausible on screen and is completely
+        /// wrong, so an outline drawn around a block the player has walked past appears in front of them.
+        /// </remarks>
+        public bool TryProjectWorld(Matrix viewProjection, Vector3d world, out float x, out float y)
+        {
+            double cx = (viewProjection[0, 0] * world.X) + (viewProjection[0, 1] * world.Y) + (viewProjection[0, 2] * world.Z) + viewProjection[0, 3];
+            double cy = (viewProjection[1, 0] * world.X) + (viewProjection[1, 1] * world.Y) + (viewProjection[1, 2] * world.Z) + viewProjection[1, 3];
+            double cw = (viewProjection[3, 0] * world.X) + (viewProjection[3, 1] * world.Y) + (viewProjection[3, 2] * world.Z) + viewProjection[3, 3];
+
+            x = 0;
+            y = 0;
+            if (cw <= 1e-6) return false;
+
+            double ndcX = cx / cw;
+            double ndcY = cy / cw;
+
+            x = (float)((ndcX + 1.0) * 0.5 * ScreenWidth);
+            y = (float)((ndcY + 1.0) * 0.5 * ScreenHeight);
+            return true;
+        }
     }
 }
