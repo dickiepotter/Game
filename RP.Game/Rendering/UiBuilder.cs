@@ -161,6 +161,116 @@ namespace RP.Game.Rendering
             _fills.Add(new HudVertex(bottomLeft, color, alpha));
         }
 
+        /// <summary>
+        /// Fills an arbitrary quadrilateral, given its corners in order around the perimeter.
+        /// </summary>
+        /// <remarks>
+        /// Needed because not everything worth drawing is axis-aligned. The obvious case is an isometric
+        /// cube: three parallelograms, none of them a rectangle, and drawing an item icon as a flat square
+        /// instead loses the one piece of information a player most wants from it -- whether the thing is a
+        /// block they can place or a material they cannot.
+        /// </remarks>
+        public void FillQuad(Vector2 a, Vector2 b, Vector2 c, Vector2 d, Vector3 color, float alpha = 1f)
+        {
+            if (_fills.Count + 6 > _fillCapacity)
+            {
+                Overflowed = true;
+                return;
+            }
+
+            Vector2 na = ToNdc(a.X, a.Y);
+            Vector2 nb = ToNdc(b.X, b.Y);
+            Vector2 nc = ToNdc(c.X, c.Y);
+            Vector2 nd = ToNdc(d.X, d.Y);
+
+            _fills.Add(new HudVertex(na, color, alpha));
+            _fills.Add(new HudVertex(nb, color, alpha));
+            _fills.Add(new HudVertex(nc, color, alpha));
+
+            _fills.Add(new HudVertex(na, color, alpha));
+            _fills.Add(new HudVertex(nc, color, alpha));
+            _fills.Add(new HudVertex(nd, color, alpha));
+        }
+
+        /// <summary>Fills a triangle.</summary>
+        public void FillTriangle(Vector2 a, Vector2 b, Vector2 c, Vector3 color, float alpha = 1f)
+        {
+            if (_fills.Count + 3 > _fillCapacity)
+            {
+                Overflowed = true;
+                return;
+            }
+
+            _fills.Add(new HudVertex(ToNdc(a.X, a.Y), color, alpha));
+            _fills.Add(new HudVertex(ToNdc(b.X, b.Y), color, alpha));
+            _fills.Add(new HudVertex(ToNdc(c.X, c.Y), color, alpha));
+        }
+
+        /// <summary>
+        /// Draws an isometric cube: a top face, a left face and a right face, shaded as if lit from above.
+        /// </summary>
+        /// <remarks>
+        /// <para>The three faces take the same base colour at different brightness, which is all it takes
+        /// to read as a solid object rather than a hexagon. The ratios are the same ones the voxel shader
+        /// uses for a surface facing up, sideways and away, so an icon and the block it represents agree
+        /// about what they look like.</para>
+        /// <para>Proportions are the standard two-to-one isometric: a face's vertical rise is half its
+        /// horizontal run, which is what makes the three faces meet cleanly at the centre.</para>
+        /// </remarks>
+        /// <param name="centre">Where the cube's middle sits.</param>
+        /// <param name="size">The cube's overall width.</param>
+        /// <param name="color">The block's base colour.</param>
+        /// <param name="alpha">Opacity.</param>
+        public void Cube(Vector2 centre, float size, Vector3 color, float alpha = 1f)
+        {
+            float hw = size * 0.5f;          // half width
+            float qh = size * 0.25f;         // quarter height: the two-to-one isometric rise
+            float vh = size * 0.32f;         // how tall the side faces are
+
+            // Six silhouette points, clockwise from the top.
+            var top = new Vector2(centre.X, centre.Y - qh - (vh * 0.5f));
+            var right = new Vector2(centre.X + hw, centre.Y - (vh * 0.5f));
+            var rightLow = new Vector2(centre.X + hw, centre.Y + (vh * 0.5f));
+            var bottom = new Vector2(centre.X, centre.Y + qh + (vh * 0.5f));
+            var leftLow = new Vector2(centre.X - hw, centre.Y + (vh * 0.5f));
+            var left = new Vector2(centre.X - hw, centre.Y - (vh * 0.5f));
+            var middle = new Vector2(centre.X, centre.Y + qh - (vh * 0.5f));
+
+            // Top brightest, left mid, right darkest -- the same ordering a surface lit from above takes.
+            FillQuad(top, right, middle, left, color * 1.15f, alpha);
+            FillQuad(left, middle, bottom, leftLow, color * 0.72f, alpha);
+            FillQuad(middle, right, rightLow, bottom, color * 0.52f, alpha);
+
+            // A thin edge where the three faces meet, which is what stops a dark block reading as a blob.
+            Vector3 edge = color * 1.5f;
+            Line(top.X, top.Y, left.X, left.Y, edge, alpha * 0.7f);
+            Line(top.X, top.Y, right.X, right.Y, edge, alpha * 0.7f);
+            Line(middle.X, middle.Y, bottom.X, bottom.Y, edge, alpha * 0.5f);
+        }
+
+        /// <summary>
+        /// Draws a flat, canted lozenge for things that are not blocks -- ingots, tools, materials.
+        /// </summary>
+        /// <remarks>
+        /// Deliberately a different silhouette from <see cref="Cube"/>. The shape alone tells the player
+        /// whether something can be placed in the world, which is the question they ask most often and the
+        /// one a square swatch cannot answer.
+        /// </remarks>
+        public void Lozenge(Vector2 centre, float size, Vector3 color, float alpha = 1f)
+        {
+            float hw = size * 0.46f;
+            float hh = size * 0.26f;
+
+            var a = new Vector2(centre.X - hw, centre.Y + (hh * 0.4f));
+            var b = new Vector2(centre.X - (hw * 0.45f), centre.Y - hh);
+            var c = new Vector2(centre.X + hw, centre.Y - (hh * 0.4f));
+            var d = new Vector2(centre.X + (hw * 0.45f), centre.Y + hh);
+
+            FillQuad(a, b, c, d, color, alpha);
+            Line(a.X, a.Y, b.X, b.Y, color * 1.5f, alpha * 0.8f);
+            Line(b.X, b.Y, c.X, c.Y, color * 1.5f, alpha * 0.8f);
+        }
+
         /// <summary>Draws a line between two points.</summary>
         public void Line(float x0, float y0, float x1, float y1, Vector3 color, float alpha = 1f)
         {
