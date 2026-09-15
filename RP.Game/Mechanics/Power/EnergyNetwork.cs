@@ -107,6 +107,57 @@ namespace RP.Game.Mechanics.Power
         /// <summary>Total energy demanded across all grids on the last tick.</summary>
         public double LastDemanded { get; private set; }
 
+        /// <summary>
+        /// How much charge is banked across the one grid a node belongs to.
+        /// </summary>
+        /// <remarks>
+        /// Per grid rather than across all of them, because two unconnected networks are two networks: a
+        /// generator on the far side of the world must not quietly pay for something here. Anyone asking
+        /// this is about to spend it, and needs to know what <i>this</i> grid can afford.
+        /// </remarks>
+        public double StoredIn(long nodeId)
+        {
+            RebuildIfNeeded();
+            if (!_nodes.TryGetValue(nodeId, out EnergyNode? node) || node.NetworkId < 0) return 0.0;
+
+            double total = 0;
+            foreach (EnergyNode member in _networks[node.NetworkId]) total += member.Stored;
+            return total;
+        }
+
+        /// <summary>
+        /// Takes a lump of charge out of one grid's storage, all at once.
+        /// </summary>
+        /// <remarks>
+        /// <para>The tick model is a rate model: supply and demand per second, fairly shared. That is right
+        /// for a furnace and wrong for anything that happens in an instant and costs a lot -- a jump across
+        /// a continent is not a machine that runs slowly, it is a bill. Drawn proportionally from every
+        /// bank on the grid so no single battery is emptied first, which would make the behaviour depend on
+        /// dictionary order.</para>
+        ///
+        /// <para>All or nothing. A partial draw would leave the caller having paid for something that did
+        /// not happen, and every caller would have to write the refund.</para>
+        /// </remarks>
+        /// <returns>Whether the charge was there and has been taken.</returns>
+        public bool DrawStored(long nodeId, double amount)
+        {
+            if (amount <= 0) return true;
+
+            RebuildIfNeeded();
+            if (!_nodes.TryGetValue(nodeId, out EnergyNode? node) || node.NetworkId < 0) return false;
+
+            List<EnergyNode> grid = _networks[node.NetworkId];
+
+            double available = 0;
+            foreach (EnergyNode member in grid) available += member.Stored;
+            if (available < amount) return false;
+
+            double share = amount / available;
+            foreach (EnergyNode member in grid) member.Stored -= member.Stored * share;
+
+            return true;
+        }
+
         /// <summary>Adds or replaces a node.</summary>
         public EnergyNode Attach(long id)
         {
