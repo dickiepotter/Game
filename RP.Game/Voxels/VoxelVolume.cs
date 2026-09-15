@@ -132,6 +132,34 @@ namespace RP.Game.Voxels
             return chunk.GetBlock(lx, ly, lz);
         }
 
+        /// <summary>
+        /// How much daylight reaches a world position, 0 to 15.
+        /// </summary>
+        /// <remarks>
+        /// Light has been stored per chunk since the lighting was written, and every consumer so far --
+        /// the mesher, the spawner -- already had a chunk in hand. Anything reasoning about the world in
+        /// world coordinates did not, and was left converting addresses by hand. Crops care whether they
+        /// can see the sky; so, eventually, will anything that grows, melts or burns.
+        /// </remarks>
+        public byte GetSkyLight(BlockPos position)
+        {
+            VoxelChunk? chunk = GetChunk(ChunkPos.FromBlock(position));
+            if (chunk == null) return 0;
+
+            VoxelChunk.ToLocal(position, out int lx, out int ly, out int lz);
+            return chunk.GetSkyLight(lx, ly, lz);
+        }
+
+        /// <summary>How much light from torches and glowing blocks reaches a world position, 0 to 15.</summary>
+        public byte GetBlockLight(BlockPos position)
+        {
+            VoxelChunk? chunk = GetChunk(ChunkPos.FromBlock(position));
+            if (chunk == null) return 0;
+
+            VoxelChunk.ToLocal(position, out int lx, out int ly, out int lz);
+            return chunk.GetBlockLight(lx, ly, lz);
+        }
+
         /// <summary>The block at a world address without generating an absent chunk — absent reads as air.</summary>
         public ushort PeekBlock(BlockPos position)
         {
