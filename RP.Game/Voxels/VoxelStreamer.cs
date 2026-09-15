@@ -2,6 +2,7 @@ namespace RP.Game.Voxels
 {
     using System;
     using System.Collections.Generic;
+    using System.Diagnostics;
     using RP.Math;
 
     /// <summary>
@@ -9,12 +10,21 @@ namespace RP.Game.Voxels
     /// nearest-first within a per-frame budget, and drops the ones that fall out of range.
     /// </summary>
     /// <remarks>
-    /// <para><b>The budget is the whole design.</b> Generating and meshing a chunk costs single-digit
-    /// milliseconds. A player walking forward crosses a chunk boundary every few seconds and needs a whole
-    /// new column of them, and doing that work the moment it is discovered produces exactly the stutter
-    /// every voxel game is known for. Capping the work per frame turns a 200 ms hitch into forty frames
-    /// that each do a little — the world fills in slightly behind the player instead of the game stopping
-    /// while it catches up.</para>
+    /// <para><b>The budget is the whole design.</b> Generating and meshing a chunk costs milliseconds. A
+    /// player walking forward crosses a chunk boundary every few seconds and needs a whole new column of
+    /// them, and doing that work the moment it is discovered produces exactly the stutter every voxel game
+    /// is known for. Capping the work per frame turns a 200 ms hitch into forty frames that each do a
+    /// little — the world fills in slightly behind the player instead of the game stopping while it catches
+    /// up.</para>
+    ///
+    /// <para><b>The budget is measured in milliseconds, not chunks.</b> A chunk count looks equivalent and
+    /// is not, because chunk cost varies by more than an order of magnitude: a chunk of open sky meshes to
+    /// nothing, while a chunk of cave-riddled ore is thousands of times the work. Budgeting four chunks a
+    /// frame therefore means four cheap ones on a fast machine and four expensive ones on a slow one — the
+    /// exact opposite of what is wanted. Worse, it scales with hardware in the wrong direction: the number
+    /// that gives 60 fps on a modern desktop gives 8 fps on a laptop from 2016, because the count was tuned
+    /// against one machine's chunk cost. A time budget is self-correcting: whatever a frame can afford, it
+    /// does, and the world simply fills in more gradually on slower hardware rather than stuttering.</para>
     ///
     /// <para><b>Nearest first.</b> The pending set is drained in order of distance from the focus, so the
     /// budget is always spent on what the player is closest to. Without it a queue in insertion order will
@@ -92,8 +102,25 @@ namespace RP.Game.Voxels
             }
         }
 
-        /// <summary>How many chunks may be built per call to <see cref="Update"/>.</summary>
-        public int BuildBudget { get; set; } = 4;
+        /// <summary>
+        /// How long, in milliseconds, may be spent building chunks per call to <see cref="Update"/>.
+        /// </summary>
+        /// <remarks>
+        /// The default leaves most of a 60 Hz frame for everything else. Raise it to fill the world in
+        /// faster at the cost of smoothness; a loading screen, where there is no frame to protect, can set
+        /// it arbitrarily high.
+        /// </remarks>
+        public double BuildBudgetMilliseconds { get; set; } = 4.0;
+
+        /// <summary>
+        /// A hard ceiling on chunks per update, whatever the time budget allows. Stops a run of trivially
+        /// cheap chunks -- a column of empty sky -- from being built by the thousand in one frame and
+        /// flooding the renderer's upload path.
+        /// </summary>
+        public int MaxChunksPerUpdate { get; set; } = 32;
+
+        /// <summary>How long the last update actually spent building, in milliseconds.</summary>
+        public double LastBuildMilliseconds { get; private set; }
 
         /// <summary>How far past the load radius a chunk must go before it is dropped, in chunks.</summary>
         public int UnloadMargin { get; set; } = 2;
@@ -196,10 +223,11 @@ namespace RP.Game.Voxels
             foreach (ChunkPos position in _toDrop) _pending.Remove(position);
         }
 
-        /// <summary>Builds up to the budget, nearest to the focus first.</summary>
+        /// <summary>Builds until the time budget runs out, nearest to the focus first.</summary>
         private void BuildSome(ChunkPos centre, Action<ChunkPos, VoxelMeshData> upload)
         {
             LastBuiltCount = 0;
+            LastBuildMilliseconds = 0;
             if (_pending.Count == 0) return;
 
             _sortQueue.Clear();
@@ -208,8 +236,10 @@ namespace RP.Game.Voxels
             // Squared chunk distance is enough to order by, and avoids a square root per comparison.
             _sortQueue.Sort((a, b) => DistanceSquared(a, centre).CompareTo(DistanceSquared(b, centre)));
 
-            int budget = BuildBudget;
-            for (int i = 0; i < _sortQueue.Count && budget > 0; i++)
+            long start = Stopwatch.GetTimestamp();
+            double budgetTicks = BuildBudgetMilliseconds * Stopwatch.Frequency / 1000.0;
+
+            for (int i = 0; i < _sortQueue.Count && LastBuiltCount < MaxChunksPerUpdate; i++)
             {
                 ChunkPos position = _sortQueue[i];
                 _pending.Remove(position);
@@ -222,10 +252,16 @@ namespace RP.Game.Voxels
 
                 upload(position, _scratch);
                 _resident.Add(position);
-
-                budget--;
                 LastBuiltCount++;
+
+                // Checked after the build rather than before, so at least one chunk is always made progress
+                // on. A budget small enough to be exhausted by a single chunk would otherwise stall the
+                // stream forever on a slow machine -- which is precisely the machine that most needs it to
+                // keep moving.
+                if (Stopwatch.GetTimestamp() - start >= budgetTicks) break;
             }
+
+            LastBuildMilliseconds = (Stopwatch.GetTimestamp() - start) * 1000.0 / Stopwatch.Frequency;
         }
 
         private static bool InRange(ChunkPos position, ChunkPos centre, int horizontal, int vertical)

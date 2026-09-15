@@ -4,6 +4,7 @@ namespace RP.Game.Graphics.Vulkan
     using System.Collections.Generic;
     using System.Linq;
     using RP.Game.Core.Logging;
+    using RP.Game.Graphics;
     using RP.Game.Rendering;
     using RP.Math;
     using Silk.NET.Core;
@@ -104,6 +105,22 @@ namespace RP.Game.Graphics.Vulkan
 
         /// <inheritdoc />
         public (float R, float G, float B, float A) ClearColor { get; set; } = (0.02f, 0.02f, 0.04f, 1f);
+
+        /// <summary>
+        /// What the chosen device can do, and the quality tier picked because of it. Valid once the
+        /// renderer has been constructed.
+        /// </summary>
+        public GraphicsCapabilities Capabilities { get; private set; } = new GraphicsCapabilities();
+
+        /// <summary>
+        /// Forces a quality tier instead of detecting one. Set before constructing the renderer.
+        /// </summary>
+        /// <remarks>
+        /// Detection guesses, and guesses low. A player whose machine is faster than it looks -- or who
+        /// would rather have the view distance than the frame rate -- needs to be able to say so, and a
+        /// developer needs to be able to see the bottom tier on a fast machine without finding an old one.
+        /// </remarks>
+        public static GraphicsTier? QualityOverride { get; set; }
 
         /// <summary>The camera used to view the scene. Position it from game code; its aspect ratio is kept
         /// in step with the swapchain automatically.</summary>
@@ -469,6 +486,54 @@ namespace RP.Game.Graphics.Vulkan
             _log.Info("Vulkan", _dynamicRenderingViaExtension
                 ? "Dynamic rendering via VK_KHR_dynamic_rendering (device predates Vulkan 1.3)."
                 : "Dynamic rendering via core Vulkan 1.3.");
+
+            Capabilities = DetectCapabilities(chosen, chosenProps, name, apiVersion);
+            _log.Info("Vulkan", Capabilities.Describe());
+        }
+
+        /// <summary>
+        /// Reads what the chosen device can do and picks a quality tier from it.
+        /// </summary>
+        /// <remarks>
+        /// Device-local memory is the useful signal. There is no way to ask a graphics device how fast it
+        /// is, and feature flags correlate with driver age rather than with throughput, but the size of a
+        /// card's own heap tracks its class closely: under two gigabytes means integrated or old, and both
+        /// want the same answer.
+        /// </remarks>
+        private GraphicsCapabilities DetectCapabilities(
+            PhysicalDevice device, PhysicalDeviceProperties props, string name, Version32 apiVersion)
+        {
+            _vk.GetPhysicalDeviceMemoryProperties(device, out PhysicalDeviceMemoryProperties memory);
+
+            long deviceMemoryBytes = 0;
+            for (int i = 0; i < memory.MemoryHeapCount; i++)
+            {
+                MemoryHeap heap = memory.MemoryHeaps[i];
+                if (heap.Flags.HasFlag(MemoryHeapFlags.DeviceLocalBit) && (long)heap.Size > deviceMemoryBytes)
+                {
+                    deviceMemoryBytes = (long)heap.Size;
+                }
+            }
+
+            long deviceMemoryMb = deviceMemoryBytes / (1024 * 1024);
+            bool integrated = props.DeviceType != PhysicalDeviceType.DiscreteGpu;
+
+            SampleCountFlags supported = props.Limits.FramebufferColorSampleCounts & props.Limits.FramebufferDepthSampleCounts;
+            int maxSamples = supported.HasFlag(SampleCountFlags.Count8Bit) ? 8
+                           : supported.HasFlag(SampleCountFlags.Count4Bit) ? 4
+                           : supported.HasFlag(SampleCountFlags.Count2Bit) ? 2 : 1;
+
+            return new GraphicsCapabilities
+            {
+                DeviceName = name,
+                Integrated = integrated,
+                ApiVersion = ((int)apiVersion.Major, (int)apiVersion.Minor),
+                DeviceMemoryMb = deviceMemoryMb,
+                DynamicRendering = true,
+                DynamicRenderingIsCore = !_dynamicRenderingViaExtension,
+                MaxSampleCount = maxSamples,
+                Tier = QualityOverride ?? GraphicsCapabilities.ChooseTier(integrated, deviceMemoryMb, (int)apiVersion.Minor),
+            };
         }
 
         // A queue family is a group of GPU "lanes" with the same capabilities. We need one that can do

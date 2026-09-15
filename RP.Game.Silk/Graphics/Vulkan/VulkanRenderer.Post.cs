@@ -52,14 +52,17 @@ namespace RP.Game.Graphics.Vulkan
         /// (plenty for clean edges without the bandwidth of 8x). Call once after the device is up.</summary>
         private void DetermineSampleCount()
         {
-            _vk.GetPhysicalDeviceProperties(_physicalDevice, out PhysicalDeviceProperties props);
-            SampleCountFlags supported = props.Limits.FramebufferColorSampleCounts & props.Limits.FramebufferDepthSampleCounts;
+            // The tier decides, not the hardware maximum. Taking the most the device *can* do is how a
+            // laptop from a decade ago ends up rendering four samples per pixel at four frames a second --
+            // it is capable of it in the sense that it does not fail, which is not the useful sense.
+            int wanted = Capabilities.SampleCount;
 
-            if (supported.HasFlag(SampleCountFlags.Count4Bit)) _msaaSamples = SampleCountFlags.Count4Bit;
-            else if (supported.HasFlag(SampleCountFlags.Count2Bit)) _msaaSamples = SampleCountFlags.Count2Bit;
-            else _msaaSamples = SampleCountFlags.Count1Bit;
+            _msaaSamples = wanted >= 8 ? SampleCountFlags.Count8Bit
+                         : wanted >= 4 ? SampleCountFlags.Count4Bit
+                         : wanted >= 2 ? SampleCountFlags.Count2Bit
+                         : SampleCountFlags.Count1Bit;
 
-            _log.Info("Vulkan", $"MSAA: {(int)_msaaSamples}x.");
+            _log.Info("Vulkan", $"MSAA: {(int)_msaaSamples}x (device offers up to {Capabilities.MaxSampleCount}x).");
         }
 
         /// <summary>Creates the HDR + bloom images, the multisampled scene target, and the sampler
@@ -360,6 +363,19 @@ namespace RP.Game.Graphics.Vulkan
             TransitionImage(cb, _bloomImageA, ImageLayout.Undefined, ImageLayout.ColorAttachmentOptimal,
                 0, AccessFlags.ColorAttachmentWriteBit,
                 PipelineStageFlags.TopOfPipeBit, PipelineStageFlags.ColorAttachmentOutputBit);
+
+            if (!Capabilities.Bloom)
+            {
+                // Bloom off: clear the bloom target to black and skip the bright pass and every blur
+                // iteration. The composite still samples it, so it cannot simply be left undefined -- but a
+                // single clear replaces one half-resolution draw plus 2*BlurIterations more, which on the
+                // hardware that asked for this is a measurable slice of the frame.
+                ClearToBlack(cb, _bloomViewA, _bloomExtent);
+                ToShaderRead(cb, _bloomImageA);
+                CompositeToSwapchain(cb, imageIndex);
+                return;
+            }
+
             FullscreenPass(cb, _brightPipeline, _brightLayout, _brightSet, _bloomViewA, _bloomExtent, null, 0);
             ToShaderRead(cb, _bloomImageA);
 
@@ -386,7 +402,42 @@ namespace RP.Game.Graphics.Vulkan
                 ToShaderRead(cb, _bloomImageA);
             }
 
-            // Composite scene + bloom -> swapchain, then draw the HUD lines on top, in one rendering.
+            CompositeToSwapchain(cb, imageIndex);
+        }
+
+        /// <summary>Begins a rendering that only clears an attachment, and ends it.</summary>
+        /// <remarks>
+        /// Cheaper than drawing a black quad: a clear is handled by the attachment load operation, so no
+        /// pipeline is bound, no vertices are fetched and no fragment shader runs.
+        /// </remarks>
+        private void ClearToBlack(CommandBuffer cb, ImageView view, Extent2D extent)
+        {
+            var attachment = new RenderingAttachmentInfo
+            {
+                SType = StructureType.RenderingAttachmentInfo,
+                ImageView = view,
+                ImageLayout = ImageLayout.ColorAttachmentOptimal,
+                LoadOp = AttachmentLoadOp.Clear,
+                StoreOp = AttachmentStoreOp.Store,
+                ClearValue = new ClearValue { Color = new ClearColorValue(0f, 0f, 0f, 1f) },
+            };
+
+            var info = new RenderingInfo
+            {
+                SType = StructureType.RenderingInfo,
+                RenderArea = new Rect2D(new Offset2D(0, 0), extent),
+                LayerCount = 1,
+                ColorAttachmentCount = 1,
+                PColorAttachments = &attachment,
+            };
+
+            BeginRendering(cb, in info);
+            EndRendering(cb);
+        }
+
+        /// <summary>Composites the scene and the bloom target into the swapchain image, then the overlay.</summary>
+        private void CompositeToSwapchain(CommandBuffer cb, uint imageIndex)
+        {
             TransitionImage(cb, _swapchainImages[imageIndex], ImageLayout.Undefined, ImageLayout.ColorAttachmentOptimal,
                 0, AccessFlags.ColorAttachmentWriteBit,
                 PipelineStageFlags.TopOfPipeBit, PipelineStageFlags.ColorAttachmentOutputBit);
