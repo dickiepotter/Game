@@ -85,6 +85,24 @@ float detailNoise(vec3 p)
     return valueNoise(p);
 }
 
+// One stable value per integer block, so two blocks of the same material are not the same block. This
+// is what stops a stone wall reading as one enormous flat quantity of stone.
+float hash31(vec3 cell)
+{
+    vec3 p = fract(cell * 0.1031);
+    p += dot(p, p.yzx + 33.33);
+    return fract((p.x + p.y) * p.z);
+}
+
+// One stable value per integer cell, for anything that wants to differ per brick or per board rather
+// than per pixel. Cheap enough to call in a branch the whole screen takes.
+float hash21(vec2 cell)
+{
+    vec3 p = fract(vec3(cell.xyx) * 0.1031);
+    p += dot(p, p.yzx + 33.33);
+    return fract((p.x + p.y) * p.z);
+}
+
 // The sky colour at a given elevation, for a given time of day. Shared by the fog so that a distant
 // hillside fades into exactly the sky behind it rather than into a fixed grey -- which is the single
 // tell that separates convincing distance from "the fog colour is wrong".
@@ -115,7 +133,8 @@ void main()
         float((vMaterial >> 16) & 0xFFu)) / 255.0;
 
     uint surface = (vMaterial >> 24) & 0x7u;
-    float variation = float((vMaterial >> 27) & 0x1Fu) / 31.0;
+    bool variant = ((vMaterial >> 27) & 1u) != 0u;
+    float variation = float((vMaterial >> 28) & 0xFu) / 15.0;
 
     // The quality tier scales the procedural detail down, and at the bottom removes it entirely. Every
     // noise fetch below is per-pixel over the whole screen, so this is the single biggest lever the
@@ -149,14 +168,59 @@ void main()
     {
         grain = detailNoise(vWorldPos * 9.0);            // fine speckle: sand, gravel, snow
     }
-    else if (surface == SURFACE_CONSTRUCTED)
+    else if (surface == SURFACE_CONSTRUCTED && !variant)
     {
-        // A regular course pattern, so built things read as deliberate against natural ground.
-        vec2 brick = vTexCoord * vec2(2.0, 1.0);
-        brick.x += floor(brick.y) * 0.5;                 // offset alternate courses
+        // Brickwork. Courses of two bricks to a block, every other row offset by half, with mortar in the
+        // joints and a little tint per brick so a wall is not one flat colour repeated.
+        vec2 brick = vTexCoord * vec2(2.0, 2.0);
+        brick.x += floor(brick.y) * 0.5;
+
         vec2 cell = abs(fract(brick) - 0.5);
-        float mortar = smoothstep(0.42, 0.5, max(cell.x, cell.y));
-        grain = 0.5 + 0.35 * detailNoise(vWorldPos * 3.4) - mortar * 0.55;
+        float mortar = smoothstep(0.40, 0.48, max(cell.x * 0.9, cell.y));
+
+        // One value per brick, so neighbours differ. Hashing the brick's own index rather than the world
+        // position is what keeps the tint constant across the face of a single brick instead of drifting
+        // across it.
+        float perBrick = hash21(floor(brick));
+
+        grain = 0.5 + (perBrick - 0.5) * 0.30 + 0.12 * detailNoise(vWorldPos * 6.0) - mortar * 0.55;
+    }
+    else if (surface == SURFACE_CONSTRUCTED && variant)
+    {
+        // Planking. Long boards with a seam between them, each board its own shade, and a lengthwise
+        // grain running along it -- which is what separates a plank floor from a brick one at a glance.
+        vec2 board = vTexCoord * vec2(1.0, 4.0);
+        float row = floor(board.y);
+        board.x += row * 0.37;                            // stagger the butt joints
+
+        float alongSeam = smoothstep(0.46, 0.5, abs(fract(board.y) - 0.5));
+        float buttSeam  = smoothstep(0.47, 0.5, abs(fract(board.x * 0.5) - 0.5));
+
+        float perBoard = hash21(vec2(floor(board.x * 0.5), row));
+        float lengthwise = detailNoise(vec3(vTexCoord.x * 26.0, row * 7.0, vTexCoord.y * 3.0));
+
+        grain = 0.5 + (perBoard - 0.5) * 0.26 + (lengthwise - 0.5) * 0.30
+              - max(alongSeam, buttSeam) * 0.45;
+    }
+    else if (surface == SURFACE_METALLIC && variant)
+    {
+        // Ore: dull rock with bright inclusions in it, rather than a block of solid metal. The blobs are
+        // a thresholded noise so they clump instead of speckling evenly, which is what makes a vein read
+        // as something embedded rather than as paint.
+        float rock = detailNoise(vWorldPos * 3.8);
+        float blob = detailNoise(vWorldPos * 7.5);
+        float inclusion = smoothstep(0.58, 0.74, blob);
+
+        grain = 0.35 + rock * 0.30 + inclusion * 0.85;
+    }
+    else if (surface == SURFACE_MATTE && variant)
+    {
+        // Wood, along the grain: rings stretched down the trunk, with the fine streaks that make the
+        // difference between timber and brown stone.
+        float rings = sin((vTexCoord.x * 7.0 + detailNoise(vWorldPos * 2.0) * 4.0) * 3.14159);
+        float streak = detailNoise(vec3(vWorldPos.x * 14.0, vWorldPos.y * 2.2, vWorldPos.z * 14.0));
+
+        grain = 0.5 + rings * 0.16 + (streak - 0.5) * 0.34;
     }
     else if (surface == SURFACE_CRYSTAL)
     {
@@ -170,6 +234,70 @@ void main()
     else
     {
         grain = detailNoise(vWorldPos * 3.4);            // general rock/soil/wood grain
+    }
+
+    // ---- Per-block character ------------------------------------------------------------------------
+    //
+    // Three cheap terms that between them do more for how the world reads than any amount of surface
+    // detail, because they work on the thing a voxel world is actually made of: individual cubes.
+    //
+    // The first is an edge bevel. A greedy-meshed wall of one material is a single enormous quad, and
+    // without this it draws as one flat sheet of colour -- the blocks are there in the geometry and
+    // invisible to the eye. Darkening the last few per cent of each block's face puts every cube back,
+    // and costs two fract calls.
+    //
+    // The second is a tint per block, hashed from the block's own coordinates, so no two neighbouring
+    // stones are quite the same stone. Natural materials get more of it than worked ones, because a
+    // brick wall that varied as much as a cliff face would look derelict.
+    //
+    // Both are scaled by the detail level, so the bottom quality tier still gets the bevel -- it is the
+    // cheapest of the three and by far the most valuable -- while the tint follows the noise.
+    float blockShape = clamp(detailLevel, 0.0, 1.0);
+
+    if (blockShape > 0.0 && surface != SURFACE_FLUID)
+    {
+        // Position within this block's face. vTexCoord tiles once per block even across a merged quad,
+        // which is exactly the coordinate this needs and the reason it is worth having.
+        vec2 inFace = abs(fract(vTexCoord) - 0.5) * 2.0;
+        float edge = max(inFace.x, inFace.y);
+
+        // A wide, shallow falloff and no line at all.
+        //
+        // The first attempt drew a hard dark seam at every block border. It certainly made the cubes
+        // legible, and it made a stone wall look like tiling -- a grid of outlined squares rather than a
+        // face of rock. Minecraft has no edge darkening whatever; what separates its blocks is that the
+        // texture restarts at each one, and that ambient occlusion darkens the corners where blocks
+        // actually meet at an angle. Both of those are already here and doing the work.
+        //
+        // What is left is a gentle doming over the outer two thirds of each face, at a tenth the strength
+        // of the old seam: enough that a wall is visibly made of blocks when you look for them, not enough
+        // to draw a line anyone notices when they are not.
+        float bevel = smoothstep(0.30, 1.0, edge) * 0.085;
+        grain *= 1.0 - bevel * blockShape;
+
+        // The block this face belongs to: step just inside the surface before flooring, or a face exactly
+        // on an integer boundary lands in whichever block the rounding happens to pick and the tint
+        // flickers as the camera moves.
+        vec3 cell = floor(vWorldPos - N * 0.25);
+        float tint = hash31(cell) - 0.5;
+
+        float spread = (surface == SURFACE_CONSTRUCTED) ? 0.07 : 0.19;
+        grain += tint * spread * blockShape;
+    }
+
+    // Crystals and anything that makes its own light get a slow shimmer. The precious materials are the
+    // reward for going a long way down, and a block that glitters as you move past it is worth more to a
+    // player than one that merely has a different colour.
+    if (surface == SURFACE_CRYSTAL || surface == SURFACE_EMISSIVE)
+    {
+        // Driven by view angle rather than by a clock: the sparkle moves when the player does, which reads
+        // as light catching a facet rather than as the block flashing on its own. The per-block phase
+        // decides how bright each one's facet is, so a vein glitters unevenly the way a real one would.
+        vec3 cell = floor(vWorldPos - N * 0.25);
+        float facet = 0.4 + 0.6 * hash31(cell);
+        float facing = dot(normalize(V + sunDir), N);
+
+        grain += facet * pow(max(facing, 0.0), 24.0) * 0.9;
     }
 
     // Keep the mean at 1 so `variation` changes the texture without darkening the material.

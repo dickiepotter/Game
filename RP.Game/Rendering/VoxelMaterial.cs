@@ -92,19 +92,24 @@ namespace RP.Game.Rendering
         /// colours looking like untextured geometry, which is the usual reason a from-scratch voxel
         /// renderer looks worse than one with a texture atlas despite doing more work per pixel.
         /// </param>
-        public static uint Pack(double r, double g, double b, VoxelSurface surface, double variation = 0.5)
+        public static uint Pack(double r, double g, double b, VoxelSurface surface, double variation = 0.5, bool variant = false)
         {
             uint ri = Quantise(r);
             uint gi = Quantise(g);
             uint bi = Quantise(b);
 
-            // Variation shares the top byte with the surface kind: 3 bits of kind, 5 of variation. Eight
-            // kinds is all the shader branches on, and 32 steps of variation is far finer than the eye can
-            // separate on a procedural detail term.
+            // The top byte carries three things: 3 bits of surface kind, 1 of variant, 4 of variation.
+            //
+            // All eight kinds were spoken for, and the surfaces that most wanted their own treatment --
+            // planks against brickwork, ore against plain metal, a log against a plank -- had nowhere to
+            // say so. One bit doubles the number of distinct patterns the shader can draw, and it was paid
+            // for by dropping variation from 32 steps to 16, which is a detail-strength dial nobody can
+            // see a single step of at either resolution.
             uint kind = (uint)surface & 0x7u;
-            uint detail = (uint)((Clamp01(variation) * 31.0) + 0.5) & 0x1Fu;
+            uint flag = variant ? 1u : 0u;
+            uint detail = (uint)((Clamp01(variation) * 15.0) + 0.5) & 0xFu;
 
-            return ri | (gi << 8) | (bi << 16) | (kind << 24) | (detail << 27);
+            return ri | (gi << 8) | (bi << 16) | (kind << 24) | (flag << 27) | (detail << 28);
         }
 
         /// <summary>Packs a colour given as a <see cref="Vector3"/> of linear components.</summary>
@@ -118,12 +123,12 @@ namespace RP.Game.Rendering
         /// <param name="hex">A colour as <c>0xRRGGBB</c>.</param>
         /// <param name="surface">How the surface responds to light.</param>
         /// <param name="variation">Procedural detail strength, in <c>[0, 1]</c>.</param>
-        public static uint FromSrgb(uint hex, VoxelSurface surface, double variation = 0.5)
+        public static uint FromSrgb(uint hex, VoxelSurface surface, double variation = 0.5, bool variant = false)
         {
             double r = SrgbToLinear(((hex >> 16) & 0xFF) / 255.0);
             double g = SrgbToLinear(((hex >> 8) & 0xFF) / 255.0);
             double b = SrgbToLinear((hex & 0xFF) / 255.0);
-            return Pack(r, g, b, surface, variation);
+            return Pack(r, g, b, surface, variation, variant);
         }
 
         /// <summary>Unpacks the linear base colour from a material word.</summary>
