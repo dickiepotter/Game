@@ -857,9 +857,24 @@ namespace RP.Game.Graphics.Vulkan
             PresentModeKHR presentMode = ChoosePresentMode(support.PresentModes);
             Extent2D extent = ChooseExtent(support.Capabilities);
 
-            // One more than the minimum reduces the chance of waiting on the driver, but never exceed the
-            // maximum (0 means "no maximum").
-            uint imageCount = support.Capabilities.MinImageCount + 1;
+            // One more than the minimum reduces the chance of waiting on the driver -- except under
+            // mailbox, which needs three to mean anything.
+            //
+            // Mailbox is "always show the newest finished frame": the presentation engine holds one image,
+            // and the application needs a spare to be drawing into while the one before it waits its turn.
+            // With two, there is no spare. The application finishes a frame, has nowhere to put the next
+            // one, and blocks until the display has taken the last -- which is v-sync with extra steps, and
+            // on this machine it pinned the game at exactly half the refresh rate: 32.01 ms a frame, which
+            // is two 16.6 ms intervals and not a coincidence.
+            //
+            // This driver reports a minimum of one, so "minimum plus one" was two, and the renderer had
+            // been asking for a mode it could not use since it was written.
+            uint wanted = support.Capabilities.MinImageCount + 1;
+            if (wanted < 3) wanted = 3;
+
+            _log.Debug("Vulkan", $"Surface: present mode {presentMode}, images min {support.Capabilities.MinImageCount} max {support.Capabilities.MaxImageCount}, asking for {wanted}.");
+
+            uint imageCount = wanted;
             if (support.Capabilities.MaxImageCount > 0 && imageCount > support.Capabilities.MaxImageCount)
             {
                 imageCount = support.Capabilities.MaxImageCount;
@@ -940,14 +955,46 @@ namespace RP.Game.Graphics.Vulkan
             return formats[0]; // any supported format is acceptable if our preferred one is absent
         }
 
+        /// <summary>
+        /// Whether to present as fast as the machine can, tearing, rather than in step with the display.
+        /// </summary>
+        /// <remarks>
+        /// Not a setting a player wants -- it is how you find out what a frame actually costs. Under
+        /// v-sync a frame that takes seventeen milliseconds and one that takes thirty-two both report
+        /// thirty-three, so optimising against that number is optimising against a staircase.
+        /// </remarks>
+        public static bool Unsynchronised { get; set; }
+
         private PresentModeKHR ChoosePresentMode(PresentModeKHR[] modes)
         {
-            // Mailbox = "always show the newest finished frame", lowest latency without tearing. FIFO is
-            // guaranteed to exist (classic v-sync) and is the safe fallback.
-            foreach (var m in modes)
+            bool Has(PresentModeKHR mode)
             {
-                if (m == PresentModeKHR.MailboxKhr) return PresentModeKHR.MailboxKhr;
+                foreach (PresentModeKHR m in modes)
+                {
+                    if (m == mode) return true;
+                }
+
+                return false;
             }
+
+            if (Unsynchronised && Has(PresentModeKHR.ImmediateKhr)) return PresentModeKHR.ImmediateKhr;
+
+            // Mailbox first: "always show the newest finished frame", lowest latency, never tears, and a
+            // late frame costs only itself.
+            if (Has(PresentModeKHR.MailboxKhr)) return PresentModeKHR.MailboxKhr;
+
+            // Then FIFO_RELAXED, and this one is worth understanding because it was costing half the frame
+            // rate on this machine.
+            //
+            // Plain FIFO only ever presents on a display refresh. A frame that arrives a hair late does not
+            // wait a hair -- it waits for the *next* refresh, so fifteen milliseconds of work becomes
+            // thirty-three milliseconds on screen, and the game reports half the rate it is actually
+            // capable of. Measured here: 14.98 ms of real work presenting at 32.06 ms.
+            //
+            // FIFO_RELAXED presents immediately when the frame is late and in step when it is not. It tears
+            // on the frames that were going to stutter anyway, which is a far better trade than halving
+            // the frame rate to hide it.
+            if (Has(PresentModeKHR.FifoRelaxedKhr)) return PresentModeKHR.FifoRelaxedKhr;
 
             return PresentModeKHR.FifoKhr;
         }
