@@ -71,3 +71,7 @@ This library builds standalone via `Game.sln`, or as part of the game via `../Sp
 dotnet build Game.sln
 dotnet test  Game.sln
 ```
+
+## Licence and disclaimer
+
+This is a personal project by Richard Potter, shared in the hope it's useful. It's free to use under the MIT licence (see [LICENSE](LICENSE)). It's provided as is: I make no promises that it works or suits your purpose, and I take no responsibility for anything that happens from using it. It isn't a product of, or supported by, any company I work for.
